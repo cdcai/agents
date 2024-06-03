@@ -10,11 +10,10 @@ import string
 from typing import Union
 
 import gymnasium as gym
-from langchain.agents.react.base import DocstoreExplorer
+from .react import DocstoreExplorer
 from langchain_community.docstore.wikipedia import Wikipedia
 
 logger = logging.getLogger(__name__)
-
 
 class WikiQAEnv(gym.Env):
     def __init__(self, question: str, truth: str, max_steps: int = 6):
