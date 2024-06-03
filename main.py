@@ -75,11 +75,15 @@ def main():
         raise NotImplementedError(f"Unknown agent class, {args.agent}")
 
     # DEBUG
+    mes = [{
+        "role": "user",
+        "content": "What is the Dutch word for happiness?"
+    }]
     res = llm.chat.completions.create(
-        messages="What is the Dutch word for happiness?", model=args.model
+        messages=mes, model=args.model
     )
 
-    ans = res["choices"][0]["message"]["content"]
+    ans = res.choices[0].message.content
 
     print(ans)
 

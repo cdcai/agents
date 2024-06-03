@@ -7,6 +7,7 @@ https://github.com/noahshinn/reflexion
 import logging
 import re
 import string
+from typing import Union
 
 import gymnasium as gym
 from langchain.agents.react.base import DocstoreExplorer
@@ -75,7 +76,7 @@ class WikiQAEnv(gym.Env):
     def is_truncated(self) -> bool:
         return self.curr_step >= self.max_steps
 
-    def parse_action(string: str) -> tuple[str, str] | tuple[None, None]:
+    def parse_action(string: str) -> Union[tuple[str, str], tuple[None, None]]:
         """
         'action[argument]' -> ('action', 'argument')
         """

@@ -7,7 +7,7 @@ https://github.com/noahshinn/reflexion
 import abc
 import logging
 import os
-from typing import Literal
+from typing import Literal, Union
 
 import gymnasium as gym
 import openai
@@ -83,7 +83,7 @@ class Agent(metaclass=abc.ABCMeta):
         self.finished = False
         self.env.reset()
 
-    def dump(self, outfile: str | os.PathLike) -> None:
+    def dump(self, outfile: Union[str, os.PathLike]) -> None:
         """
         Dump scratchfile to disk
         """
