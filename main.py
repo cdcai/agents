@@ -1,5 +1,6 @@
 import argparse
 import os
+import logging
 
 import openai
 from azure.identity import ClientSecretCredential
@@ -43,7 +44,26 @@ def main():
         choices=["last_attempt", "reflexion", "last_attempt_reflexion"],
         default="last_attempt_reflexion",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        type=bool
+    )
+    parser.add_argument(
+        "--log_path",
+        default="out.log",
+        type=str
+    )
     args = parser.parse_args()
+
+    if args.debug:
+        # Add debug logging
+        logger = logging.getLogger()
+        logger.setLevel(logging.DEBUG)
+        handle = logging.FileHandler(args.log_path)
+        handle.setLevel(logging.DEBUG)
+        logger.addHandler(handle)
 
     # Initialize environment / gymnasium
     envir = util.WikiQAEnv(
@@ -74,18 +94,22 @@ def main():
     else:
         raise NotImplementedError(f"Unknown agent class, {args.agent}")
 
-    # DEBUG
-    mes = [{
-        "role": "user",
-        "content": "What is the Dutch word for happiness?"
-    }]
-    res = llm.chat.completions.create(
-        messages=mes, model=args.model
-    )
+    trial_results = []
 
-    ans = res.choices[0].message.content
+    for i in range(args.n_trials):
+        if args.agent != "reflexion":
+            # Only Reflexion stores
+            # memory between trials
+            agent.reset()
+        agent.run()
 
-    print(ans)
+        if args.debug:
+            # Dump full scratchpad
+            logger.debug("Trial complete. Full Scratchpad:\n" + agent.scratchpad)
+        
+        trial_results.append(agent.correct)
+    
+    print(f"Successful trials: {sum(trial_results)} / {len(trial_results)}")
 
 
 if __name__ == "__main__":
