@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class Agent(metaclass=abc.ABCMeta):
-    finished: bool = False
+    correct: bool = False
     terminated: bool = False
     truncated: bool = False
     curr_step: int = 1
@@ -57,7 +57,9 @@ class Agent(metaclass=abc.ABCMeta):
             logger.debug(e)
             raise e
 
-        out = res["choices"][0]["message"]["content"]
+        out_msg = res.choices[0].message
+
+        out = self.clean_response(out_msg.content)
 
         logger.debug(f"Received response: {out}")
         return out
@@ -73,14 +75,14 @@ class Agent(metaclass=abc.ABCMeta):
         # NOTE: I think they also checked that prompt length
         # was under a certain value here, but that'd mean
         # importing tiktoken and computing it each step
-        return self.truncated and not self.finished
+        return self.truncated and not self.correct
 
     def reset(self) -> None:
         self.scratchpad = ""
         self.curr_step = 1
         self.truncated = False
         self.terminated = False
-        self.finished = False
+        self.correct = False
         self.env.reset()
 
     def dump(self, outfile: Union[str, os.PathLike]) -> None:
@@ -90,6 +92,10 @@ class Agent(metaclass=abc.ABCMeta):
         with open(outfile, "w", encoding="utf-8") as file:
             file.writelines(elem + "\n" for elem in self.scratchpad.split("\n"))
 
+    @staticmethod
+    def clean_response(res: str) -> str:
+        out = res.strip('\n').strip().replace('\n', '')
+        return out
 
 class ReactAgent(Agent):
     BASE_PROMPT = """Solve a question answering task with interleaving Thought, Action, Observation steps. Thought can reason about the current situation, and Action can be three types: 
@@ -136,7 +142,7 @@ Question: {question}{scratchpad}"""
         # Observe
         logger.debug("executing action and recieving observation...")
         self.scratchpad += f"\nObservation {self.curr_step}: "
-        obs, self.finished, self.terminated, self.truncated, self.curr_step = (
+        obs, self.correct, self.terminated, self.truncated, self.curr_step = (
             self.env.step(action)
         )
         self.scratchpad += obs
@@ -199,14 +205,14 @@ Reflection:"""
         self.strategy = reflection_strategy
         pass
 
-    def run(self) -> None:
+    def run(self, reset: bool = False) -> None:
         """
         Run standard React logic, but add in a reflection step if the agent failed previously
         """
         if (self.is_terminated or self.is_truncated) and not self.env.is_correct():
             self.reflect()
 
-        super().run()
+        super().run(reset)
 
     def format_prompt(self) -> str:
         """
