@@ -50,7 +50,7 @@ class Agent(metaclass=abc.ABCMeta):
         logger.debug(f"Sending prompt to LLM:\n{prompt}")
         try:
             res = self.llm.chat.completions.create(
-                prompt, model=self.model_name, max_tokens=n_tok
+                messages=[prompt], model=self.model_name, max_tokens=n_tok
             )
         except Exception as e:
             # TODO: some error handling here
@@ -59,9 +59,9 @@ class Agent(metaclass=abc.ABCMeta):
 
         out_msg = res.choices[0].message
 
-        out = self.clean_response(out_msg.content)
+        out = self.clean_response(out_msg.content) + "\n"
 
-        logger.debug(f"Received response: {out}")
+        logger.info(f"Received response: {out}")
         return out
 
     @abc.abstractmethod
@@ -98,16 +98,17 @@ class Agent(metaclass=abc.ABCMeta):
         return out
 
 class ReactAgent(Agent):
-    BASE_PROMPT = """Solve a question answering task with interleaving Thought, Action, Observation steps. Thought can reason about the current situation, and Action can be three types: 
-(1) Search[entity], which searches the exact entity on Wikipedia and returns the first paragraph if it exists. If not, it will return some similar entities to search.
-(2) Lookup[keyword], which returns the next sentence containing keyword in the last passage successfully found by Search.
-(3) Finish[answer], which returns the answer and finishes the task.
-You may take as many steps as necessary.
-Here are some examples:
-{examples}
-(END OF EXAMPLES)
+    BASE_PROMPT = """Solve a question answering task with interleaving Thought, Action, Observation steps.
+    Thought can reason about the current situation, and Action can be three types: 
+    (1) Search[entity], which searches the exact entity on Wikipedia and returns the first paragraph if it exists. If not, it will return some similar entities to search.
+    (2) Lookup[keyword], which returns the next sentence containing keyword in the last passage successfully found by Search.
+    (3) Finish[answer], which returns the answer and finishes the task.
+    You may take as many steps as necessary, but only respond with the step requested at the end of this message.
+    Here are some examples:
+    {examples}
+    (END OF EXAMPLES)
 
-Question: {question}{scratchpad}"""
+    Question: {question}{scratchpad}"""
 
     def __init__(
         self,
@@ -129,25 +130,25 @@ Question: {question}{scratchpad}"""
         """
 
         # Think
-        logger.debug("thinking...")
+        logger.info("thinking...")
         self.scratchpad += f"\nThought {self.curr_step}: "
         self.scratchpad += self.prompt_agent(self.format_prompt())
 
         # Act
-        logger.debug("getting action...")
+        logger.info("getting action...")
         self.scratchpad += f"\nAct {self.curr_step}: "
         action = self.prompt_agent(self.format_prompt())
         self.scratchpad += action
 
         # Observe
-        logger.debug("executing action and recieving observation...")
+        logger.info("executing action and recieving observation...")
         self.scratchpad += f"\nObservation {self.curr_step}: "
         obs, self.correct, self.terminated, self.truncated, self.curr_step = (
             self.env.step(action)
         )
-        self.scratchpad += obs
+        self.scratchpad += obs + "\n"
 
-    def format_prompt(self) -> str:
+    def format_prompt(self) -> dict[str, str]:
         """
         Format the base prompt with dynamic content
         using f-string plus kwargs
@@ -156,7 +157,7 @@ Question: {question}{scratchpad}"""
             examples=self.examples, question=self.question, scratchpad=self.scratchpad
         )
 
-        return fmt_prompt
+        return {"role": "user", "content": fmt_prompt}
 
 
 class ReactandReflectAgent(ReactAgent):
@@ -209,23 +210,26 @@ Reflection:"""
         """
         Run standard React logic, but add in a reflection step if the agent failed previously
         """
-        if (self.is_terminated or self.is_truncated) and not self.env.is_correct():
+        if (self.is_terminated() or self.is_truncated()) and not self.env.is_correct():
             self.reflect()
 
         super().run(reset)
 
-    def format_prompt(self) -> str:
+    def format_prompt(self) -> dict[str, str]:
         """
         Format the base prompt with dynamic content
         using f-string plus kwargs
         """
         fmt_prompt = self.BASE_PROMPT.format(
-            examples=self.examples, question=self.question, scratchpad=self.scratchpad
+            examples=self.examples,
+            question=self.question,
+            scratchpad=self.scratchpad,
+            reflections=self.reflection_str
         )
 
-        return fmt_prompt
+        return {"role": "user", "content": fmt_prompt}
 
-    def format_reflection_prompt(self) -> str:
+    def format_reflection_prompt(self) -> dict[str, str]:
         """
         Format the reflection prompt with dynamic content
         using f-string plus kwargs
@@ -233,16 +237,10 @@ Reflection:"""
         fmt_prompt = self.REFELECTION_PROMPT.format(
             examples=self.examples,
             question=self.question,
-            scratchpad=self.scratchpad,
-            reflections=self.reflection_str,
+            scratchpad=self.scratchpad
         )
 
-        return fmt_prompt
-
-    def compose_reflections(self) -> None:
-        """
-        From Reflections (or just prior attempt)
-        """
+        return {"role": "user", "content": fmt_prompt}
 
     def reflect(self) -> None:
         """
@@ -261,7 +259,7 @@ Reflection:"""
             self.reflection_str += "(END PREVIOUS TRIAL)\n"
         elif self.strategy == "reflexion":
             self.reflections.append(
-                self.prompt_agent(self.format_reflection_prompt, n_tok=250)
+                self.prompt_agent(self.format_reflection_prompt(), n_tok=250)
             )
             self.reflection_str += self.REFLECTION_HEADER + "\n"
             self.reflection_str += "\n- ".join(self.reflections)
@@ -271,7 +269,7 @@ Reflection:"""
             self.reflection_str += self.scratchpad
             self.reflection_str += "(END PREVIOUS TRIAL)\n"
             self.reflections.append(
-                self.prompt_agent(self.format_reflection_prompt, n_tok=250)
+                self.prompt_agent(self.format_reflection_prompt(), n_tok=250)
             )
             self.reflection_str += self.REFLECTION_HEADER + "\n"
             self.reflection_str += "\n- ".join(self.reflections)
