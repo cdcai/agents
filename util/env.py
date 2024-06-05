@@ -12,6 +12,7 @@ from typing import Union
 import gymnasium as gym
 from .react import DocstoreExplorer
 from langchain_community.docstore.wikipedia import Wikipedia
+from .ssl import no_ssl_verification
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +46,14 @@ class WikiQAEnv(gym.Env):
             else:
                 obs = "Answer is INCORRECT"
 
-            logger.debug(f"Final answer given: {arg}, {obs}")
+            logger.info(f"Final answer given: {arg}, {obs}")
             self.terminated = True
 
         elif action_type == "Search":
             try:
-                obs = self.explorer.search(arg).strip("\n").strip()
+                # HACK: CDC Uses self-signed certs in resolution
+                with no_ssl_verification():
+                    obs = self.explorer.search(arg).strip("\n").strip()
             except Exception as e:
                 logger.debug(e)
                 obs = "Could not find that page, please try another search."
@@ -59,6 +62,7 @@ class WikiQAEnv(gym.Env):
             try:
                 obs = self.explorer.lookup(arg).strip("\n").strip()
             except Exception as e:
+                logger.debug(e)
                 obs = "The last page Searched was not found, so you cannot Lookup a keyword in it. Please try one of the similar pages given."
         else:
             obs = "Invalid Action. Valid Actions are Lookup[<topic>] Search[<topic>] and Finish[<answer>]."
@@ -69,12 +73,13 @@ class WikiQAEnv(gym.Env):
 
         self.curr_step += 1
 
-        logger.debug(f"Observed: {obs}; truncated: {truncated}; finished: {terminated}")
+        logger.info(f"Observed: {obs}; truncated: {truncated}; finished: {terminated}")
         return (obs, reward, terminated, truncated, self.curr_step)
 
     def is_truncated(self) -> bool:
         return self.curr_step >= self.max_steps
 
+    @staticmethod
     def parse_action(string: str) -> Union[tuple[str, str], tuple[None, None]]:
         """
         'action[argument]' -> ('action', 'argument')
