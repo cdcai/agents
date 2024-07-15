@@ -7,13 +7,15 @@ https://github.com/noahshinn/reflexion
 import abc
 import logging
 import os
-from typing import Literal, Union
+import re
+from typing import Literal, Union, Optional
 
+import backoff
 import gymnasium as gym
 import openai
+from azure.identity import ClientSecretCredential
 
 logger = logging.getLogger(__name__)
-
 
 class Agent(metaclass=abc.ABCMeta):
     correct: bool = False
@@ -25,14 +27,19 @@ class Agent(metaclass=abc.ABCMeta):
     SYSTEM_PROMPT: str = ""
 
     def __init__(
-        self, question: str, model_name: str, llm: openai.OpenAI, env: gym.Env
+        self, question: str, model_name: str, llm: Optional[openai.OpenAI] = None
     ):
         self.question = question
-        self.llm = llm
-        self.model_name = model_name
-        self.env = env
-        self.reset()
 
+        # We default to Azure OpenAI here, but
+        # we could also use something else as long as it follows the OpenAI API
+        if llm is None:
+            self.authenticate()
+            self.llm = openai.AzureOpenAI()
+        else:
+            self.llm = llm
+        self.model_name = model_name
+        self.reset()
 
     def run(self, reset: bool = False) -> None:
         if reset:
@@ -44,14 +51,34 @@ class Agent(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def step(self):
-        pass
+        raise NotImplementedError()
 
-    def prompt_agent(self, prompt: str, n_tok: int = 100) -> str:
+    @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3, logger=logger)
+    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: int = 100) -> str:
+        
+        # Prompts should be passed as a list, so handle
+        # the case where we just passed a single dict
+        if isinstance(prompt, dict):
+            prompt = [prompt]
+
         logger.debug(f"Sending prompt to LLM:\n{prompt}")
         try:
             res = self.llm.chat.completions.create(
-                messages=[prompt], model=self.model_name, max_tokens=n_tok
+                messages=prompt, model=self.model_name, max_tokens=n_tok
             )
+        except openai.AuthenticationError:
+            # HACK: This isn't terrific, but it should work for
+            # our current use case (Azure OpenAI with service principal/User creds)
+            if isinstance(self.llm, openai.AzureOpenAI):
+                self.authenticate()
+                self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
+                res = self.llm.chat.completions.create(
+                    messages=prompt,
+                    model=self.model_name,
+                    max_tokens=n_tok
+                )
+            else:
+                raise e
         except Exception as e:
             # TODO: some error handling here
             logger.debug(e)
@@ -65,8 +92,8 @@ class Agent(metaclass=abc.ABCMeta):
         return out
 
     @abc.abstractmethod
-    def format_prompt(self, **kwargs) -> str:
-        pass
+    def format_prompt(self, **kwargs) -> dict[str, str]:
+        raise NotImplementedError()
 
     def is_terminated(self) -> bool:
         return self.terminated
@@ -83,7 +110,6 @@ class Agent(metaclass=abc.ABCMeta):
         self.truncated = False
         self.terminated = False
         self.correct = False
-        self.env.reset()
 
     def dump(self, outfile: Union[str, os.PathLike]) -> None:
         """
@@ -97,7 +123,38 @@ class Agent(metaclass=abc.ABCMeta):
         out = res.strip('\n').strip().replace('\n', '')
         return out
 
-class ReactAgent(Agent):
+    @staticmethod
+    def authenticate() -> None:
+        """
+        Authenticate against Azure OpenAI using Service Principal
+        """
+        # === Service Principal auth ========================
+        credential = ClientSecretCredential(
+            tenant_id=os.environ["SP_TENANT_ID"],
+            client_id=os.environ["SP_CLIENT_ID"],
+            client_secret=os.environ["SP_CLIENT_SECRET"],
+        )
+
+        os.environ["AZURE_OPENAI_API_KEY"] = credential.get_token(
+            "https://cognitiveservices.azure.com/.default"
+        ).token
+
+        os.environ["AZURE_OPENAI_ENDPOINT"] = os.environ["GPT4_URL"]
+
+class EnvAgent(Agent):
+    """
+    A Base (abstract) class for language agents which interact with an environment
+    (as implemented by gymnasium) 
+    """
+    def __init__(self, question: str, model_name: str, llm: openai.OpenAI, env: gym.Env):
+        self.env = env
+        super().__init__(question, model_name, llm)
+
+    def reset(self):
+        super().reset()
+        self.env.reset()
+
+class ReactAgent(EnvAgent):
     BASE_PROMPT = """Solve a question answering task with interleaving Thought, Action, Observation steps.
     Thought can reason about the current situation, and Action can be three types: 
     (1) Search[entity], which searches the exact entity on Wikipedia and returns the first paragraph if it exists. If not, it will return some similar entities to search.
