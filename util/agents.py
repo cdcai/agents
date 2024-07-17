@@ -8,7 +8,7 @@ import abc
 import logging
 import os
 import re
-from typing import Literal, Union, Optional
+from typing import Literal, Union, Optional, Callable
 
 import backoff
 import gymnasium as gym
@@ -167,7 +167,7 @@ class ToolAwareAgent(Agent):
     answer : str = ""
 
     @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3, logger=logger)
-    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: int = 100, tool_use : Literal["required", "auto"] = "required"):
+    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto"):
         
         # Prompts should be passed as a list, so handle
         # the case where we just passed a single dict
@@ -178,7 +178,7 @@ class ToolAwareAgent(Agent):
             res = self.llm.chat.completions.create(
                 messages=prompt,
                 model=self.model_name,
-                functions=self.TOOLS,
+                tools=self.TOOLS,
                 tool_choice=tool_use,
                 max_tokens=n_tok
             )
@@ -201,7 +201,7 @@ class ToolAwareAgent(Agent):
             logger.debug(e)
             raise e
 
-        return res
+        return res.choices[0]
 
     def step(self):
         # Pull base query + system messages
@@ -209,37 +209,47 @@ class ToolAwareAgent(Agent):
         llm_prompt_input = self.format_prompt()
 
         # If we have existing tool response messages, append them
-        # and reset before we recieve new data
         if len(self.tool_res_payload):
             llm_prompt_input.extend(self.tool_res_payload)
-            self.tool_res_payload = []
         
         # Send off messages for reply
         self.scratchpad += f"=== Input {self.curr_step} ==========\n"
         self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input)
         self.scratchpad += "\n===================================\n"
     
-        response = self.prompt_agent(llm_prompt_input, n_tok = 2 * self.chunk_max)
-
-        # Determine if we're truncated
-        self.truncated = response.finish_reason == "length"
+        response = self.prompt_agent(llm_prompt_input)
 
         # Append GPT response to next payload
-        self.tool_res_payload.append(response.choices[0].message)
+        self.tool_res_payload.append(
+            {
+            "role": "assistant",
+            "content": response.message.content if response.message.content is not None else ""
+            }
+        )
 
+        if response.finish_reason == "length":
+            # Determine if we're truncated
+            self.truncated = True
         # Recursive call if tool calls in response
-        if response.requires_action:
-            for tool in response.required_action.submit_tool_outputs.tool_calls:
+        elif response.finish_reason == "tool_calls":
+            for tool in response.message.tool_calls:
                 # Try to call tool, if present, else raise.
                 try:
-                    fun = getattr(self, tool.function.name)
-                    kwargs : dict[str, any] = tool.function.arguments
-                    kwargs.update({"id": tool["id"]})
+                    fun : Callable = getattr(self, tool.function.name)
+                    # OpenAI returns as str, which should hopefully eval to dict
+                    kwargs : dict[str, any] = eval(tool.function.arguments)
 
                     logger.info(f"Got tool call: {fun}({kwargs})")
 
                     tool_result = fun(**kwargs)
-                    self.tool_res_payload.append(tool_result)
+                    self.tool_res_payload.append(
+                        {
+                            "tool_call_id": tool.id,
+                            "role": "function",
+                            "name": tool.function.name,
+                            "content": tool_result
+                        }
+                    )
                 except Exception as e:
                     logger.error(f"Tool call {tool} failed.")
                     raise e
@@ -260,6 +270,14 @@ class ToolAwareAgent(Agent):
         self.answer = ""
         self.tool_res_payload = []
         return super().reset()
+
+    def format_prompt(self) -> list[dict[str, str]]:
+        out = [
+            {"role": "system", "content": self.SYSTEM_PROMPT},
+            {"role": "user", "content": re.sub("\s+", " ", self.BASE_PROMPT).format(question=self.question)}
+        ]
+
+        return out
 
 class EnvAgent(Agent):
     """
