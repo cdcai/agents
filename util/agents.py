@@ -18,7 +18,6 @@ from azure.identity import ClientSecretCredential
 logger = logging.getLogger(__name__)
 
 class Agent(metaclass=abc.ABCMeta):
-    correct: bool = False
     terminated: bool = False
     truncated: bool = False
     curr_step: int = 1
@@ -61,12 +60,12 @@ class Agent(metaclass=abc.ABCMeta):
         if isinstance(prompt, dict):
             prompt = [prompt]
 
-        logger.debug(f"Sending prompt to LLM:\n{prompt}")
         try:
             res = self.llm.chat.completions.create(
                 messages=prompt, model=self.model_name, max_tokens=n_tok
             )
         except openai.AuthenticationError:
+            logger.info("Auth failed, attempting to re-authenticate before retrying")
             # HACK: This isn't terrific, but it should work for
             # our current use case (Azure OpenAI with service principal/User creds)
             if isinstance(self.llm, openai.AzureOpenAI):
@@ -99,17 +98,13 @@ class Agent(metaclass=abc.ABCMeta):
         return self.terminated
 
     def is_truncated(self) -> bool:
-        # NOTE: I think they also checked that prompt length
-        # was under a certain value here, but that'd mean
-        # importing tiktoken and computing it each step
-        return self.truncated and not self.correct
+        return self.truncated
 
     def reset(self) -> None:
         self.scratchpad = ""
         self.curr_step = 1
         self.truncated = False
         self.terminated = False
-        self.correct = False
 
     def dump(self, outfile: Union[str, os.PathLike]) -> None:
         """
@@ -141,18 +136,152 @@ class Agent(metaclass=abc.ABCMeta):
 
         os.environ["AZURE_OPENAI_ENDPOINT"] = os.environ["GPT4_URL"]
 
+class ToolAwareAgent(Agent):
+    """
+    An agent which can utilize tool calls
+    """
+
+    TOOLS : list[dict] = [
+        # Submit (final response)
+        {
+            "type": "function",
+            "function": {
+                "name": "call_submit",
+                "description": "Submit the final response back to user",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "input": {
+                            "type": "string",
+                            "description": "Final response to user"
+                        }
+                    },
+                    "required": ["input"]
+                }
+            }
+        }
+    ]
+
+    # Payload to send back in subsequent steps
+    tool_res_payload : list[dict] = []
+    answer : str = ""
+
+    @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3, logger=logger)
+    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: int = 100, tool_use : Literal["required", "auto"] = "required"):
+        
+        # Prompts should be passed as a list, so handle
+        # the case where we just passed a single dict
+        if isinstance(prompt, dict):
+            prompt = [prompt]
+
+        try:
+            res = self.llm.chat.completions.create(
+                messages=prompt,
+                model=self.model_name,
+                functions=self.TOOLS,
+                tool_choice=tool_use,
+                max_tokens=n_tok
+            )
+        except openai.AuthenticationError:
+            logger.info("Auth failed, attempting to re-authenticate before retrying")
+            # HACK: This isn't terrific, but it should work for
+            # our current use case (Azure OpenAI with service principal/User creds)
+            if isinstance(self.llm, openai.AzureOpenAI):
+                self.authenticate()
+                self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
+                res = self.llm.chat.completions.create(
+                    messages=prompt,
+                    model=self.model_name,
+                    max_tokens=n_tok
+                )
+            else:
+                raise e
+        except Exception as e:
+            # TODO: some error handling here
+            logger.debug(e)
+            raise e
+
+        return res
+
+    def step(self):
+        # Pull base query + system messages
+        # (abstract)
+        llm_prompt_input = self.format_prompt()
+
+        # If we have existing tool response messages, append them
+        # and reset before we recieve new data
+        if len(self.tool_res_payload):
+            llm_prompt_input.extend(self.tool_res_payload)
+            self.tool_res_payload = []
+        
+        # Send off messages for reply
+        self.scratchpad += f"=== Input {self.curr_step} ==========\n"
+        self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input)
+        self.scratchpad += "\n===================================\n"
+    
+        response = self.prompt_agent(llm_prompt_input, n_tok = 2 * self.chunk_max)
+
+        # Determine if we're truncated
+        self.truncated = response.finish_reason == "length"
+
+        # Append GPT response to next payload
+        self.tool_res_payload.append(response.choices[0].message)
+
+        # Recursive call if tool calls in response
+        if response.requires_action:
+            for tool in response.required_action.submit_tool_outputs.tool_calls:
+                # Try to call tool, if present, else raise.
+                try:
+                    fun = getattr(self, tool.function.name)
+                    kwargs : dict[str, any] = tool.function.arguments
+                    kwargs.update({"id": tool["id"]})
+
+                    logger.info(f"Got tool call: {fun}({kwargs})")
+
+                    tool_result = fun(**kwargs)
+                    self.tool_res_payload.append(tool_result)
+                except Exception as e:
+                    logger.error(f"Tool call {tool} failed.")
+                    raise e
+        
+        # End Step
+        self.curr_step += 1
+    
+    def call_submit(self, input: str) -> None:
+        """
+        Final response call, which terminates further processing
+        """
+        out_msg = self.clean_response(input)
+        logger.info(f"Received final response: {out_msg}")
+        self.answer = out_msg
+        self.terminated = True
+    
+    def reset(self) -> None:
+        self.answer = ""
+        self.tool_res_payload = []
+        return super().reset()
+
 class EnvAgent(Agent):
     """
     A Base (abstract) class for language agents which interact with an environment
     (as implemented by gymnasium) 
     """
+    correct: bool = False
+
     def __init__(self, question: str, model_name: str, llm: openai.OpenAI, env: gym.Env):
         self.env = env
         super().__init__(question, model_name, llm)
+    
+    def is_truncated(self) -> bool:
+        # NOTE: I think they also checked that prompt length
+        # was under a certain value here, but that'd mean
+        # importing tiktoken and computing it each step
+        return super().truncated() and not self.correct
 
     def reset(self):
         super().reset()
         self.env.reset()
+        self.correct = False
 
 class ReactAgent(EnvAgent):
     BASE_PROMPT = """Solve a question answering task with interleaving Thought, Action, Observation steps.
