@@ -6,6 +6,7 @@ https://github.com/noahshinn/reflexion
 
 import abc
 import logging
+import json
 import os
 import re
 import subprocess
@@ -31,6 +32,7 @@ class Agent(metaclass=abc.ABCMeta):
     truncated: bool = False
     curr_step: int = 1
     scratchpad: str = ""
+    answer: str = ""
     BASE_PROMPT: str = ""
     SYSTEM_PROMPT: str = ""
 
@@ -62,7 +64,7 @@ class Agent(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3, logger=logger)
-    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: int = 100) -> str:
+    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: int = 100, **oai_kwargs):
         
         # Prompts should be passed as a list, so handle
         # the case where we just passed a single dict
@@ -71,7 +73,8 @@ class Agent(metaclass=abc.ABCMeta):
 
         try:
             res = self.llm.chat.completions.create(
-                messages=prompt, model=self.model_name, max_tokens=n_tok
+                messages=prompt, model=self.model_name, max_tokens=n_tok,
+                **oai_kwargs
             )
         except openai.AuthenticationError:
             logger.info("Auth failed, attempting to re-authenticate before retrying")
@@ -83,7 +86,8 @@ class Agent(metaclass=abc.ABCMeta):
                 res = self.llm.chat.completions.create(
                     messages=prompt,
                     model=self.model_name,
-                    max_tokens=n_tok
+                    max_tokens=n_tok,
+                    **oai_kwargs
                 )
             else:
                 raise e
@@ -92,11 +96,9 @@ class Agent(metaclass=abc.ABCMeta):
             logger.debug(e)
             raise e
 
-        out_msg = res.choices[0].message
+        out = res.choices[0]
+        logger.info(f"Received response: {out.message.content}")
 
-        out = self.clean_response(out_msg.content) + "\n"
-
-        logger.info(f"Received response: {out}")
         return out
 
     @abc.abstractmethod
@@ -111,6 +113,7 @@ class Agent(metaclass=abc.ABCMeta):
 
     def reset(self) -> None:
         self.scratchpad = ""
+        self.answer = ""
         self.curr_step = 1
         self.truncated = False
         self.terminated = False
@@ -173,45 +176,18 @@ class ToolAwareAgent(Agent):
 
     # Payload to send back in subsequent steps
     tool_res_payload : list[dict] = []
-    answer : str = ""
 
-    @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3, logger=logger)
+    @backoff.on_exception(backoff.expo, json.decoder.JSONDecodeError, max_tries=3, logger=logger)
     def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto"):
         
-        # Prompts should be passed as a list, so handle
-        # the case where we just passed a single dict
-        if isinstance(prompt, dict):
-            prompt = [prompt]
+        out = super().prompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use)
 
-        try:
-            res = self.llm.chat.completions.create(
-                messages=prompt,
-                model=self.model_name,
-                tools=self.TOOLS,
-                tool_choice=tool_use,
-                max_tokens=n_tok
-            )
-        except openai.AuthenticationError:
-            logger.info("Auth failed, attempting to re-authenticate before retrying")
-            # HACK: This isn't terrific, but it should work for
-            # our current use case (Azure OpenAI with service principal/User creds)
-            if isinstance(self.llm, openai.AzureOpenAI):
-                self.authenticate()
-                self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
-                res = self.llm.chat.completions.create(
-                    messages=prompt,
-                    model=self.model_name,
-                    max_tokens=n_tok
-                )
-            else:
-                raise e
-        except Exception as e:
-            # TODO: some error handling here
-            logger.debug(e)
-            raise e
+        # attempt to parse tool call arguments
+        if out.finish_reason == "tool_calls":
+            for i, tool in enumerate(out.message.tool_calls):
+                out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
 
-        return res.choices[0]
-
+        return out
     def step(self):
         # Pull base query + system messages
         # (abstract)
@@ -246,9 +222,9 @@ class ToolAwareAgent(Agent):
                 try:
                     fun : Callable = getattr(self, tool.function.name)
                     # OpenAI returns as str, which should hopefully eval to dict
-                    kwargs : dict[str, any] = eval(tool.function.arguments)
+                    kwargs : dict[str, any] = tool.function.arguments
 
-                    logger.info(f"Got tool call: {fun}({kwargs})")
+                    logger.info(f"Got tool call: {fun}({str(kwargs)[:30] + "..."})")
 
                     tool_result = fun(**kwargs)
                     self.tool_res_payload.append(
@@ -276,7 +252,6 @@ class ToolAwareAgent(Agent):
         self.terminated = True
     
     def reset(self) -> None:
-        self.answer = ""
         self.tool_res_payload = []
         return super().reset()
 
@@ -326,6 +301,13 @@ class EnvAgent(Agent):
         # importing tiktoken and computing it each step
         return super().truncated() and not self.correct
 
+    def prompt_agent(self, prompt: dict[str, str] | list[dict[str, str]], n_tok: int = 100, **oai_kwargs) -> str:
+        out_msg = super().prompt_agent(prompt, n_tok, **oai_kwargs)
+
+        out = self.clean_response(out_msg.message.content) + "\n"
+
+        return out
+
     def reset(self):
         super().reset()
         self.env.reset()
@@ -349,7 +331,6 @@ class SASConvertAgent(Agent):
     ```
     """
     py_scripts : list[str] = []
-    answer : list[str] = []
 
     def __init__(self, question: str, model_name: str, llm: OpenAI | None = None, chunk_max : int = 2500):
         # Get tokenizer to handle chunking responses if needed
@@ -368,61 +349,52 @@ class SASConvertAgent(Agent):
     def run(self, reset: bool = False) -> None:
         super().run(reset)
 
-        self.dump_pyscripts()
+        self.combine_pyscripts()
 
     def step(self):
         # Prompt LLM for first-pass
         llm_prompt_input = self.format_prompt()
-        first_answer = self.prompt_agent(llm_prompt_input, n_tok = 2 * self.chunk_max)
+        first_answer = self.prompt_agent(llm_prompt_input, n_tok = 2 * self.chunk_max).message.content
         self.scratchpad += f"=== Input {self.curr_step} ==========\n"
         self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input)
         self.scratchpad += "\n===================================\n"
 
         # Attempt to parse python scripts in response
-        self.extract_pyscripts(first_answer)
+        ret_scripts = self.extract_pyscripts(first_answer)
         self.scratchpad += f"\n=== First Answer {self.curr_step} =====\n"
-        self.scratchpad += self.py_scripts[-1]
+        self.scratchpad += "\n".join(ret_scripts)
         self.scratchpad += "\n===================================\n"
 
         # Send output script to another agent for refinement
-        refine_agent = PythonRefineAgent(self.py_scripts[-1], self.model_name, self.llm)
-        refine_agent.run()
-        self.answer.append(refine_agent.answer)
-        self.scratchpad += f"\n=== Refined Answer {self.curr_step} =====\n"
-        self.scratchpad += self.answer[-1]
+        self.scratchpad += f"\n=== Refined Answer(s) {self.curr_step} =====\n"
+        for script in ret_scripts:
+            refine_agent = PythonRefineAgent(script, self.model_name, self.llm)
+            refine_agent.run()
+            self.py_scripts.append(refine_agent.answer)
+            self.scratchpad += refine_agent.answer
         self.scratchpad += "\n===================================\n"
 
         # End run
         self.terminated = len(self.question) == 0
         self.curr_step += 1
 
-    @staticmethod
-    def clean_response(res: str) -> str:
-        """
-        Over-rides base clean_response method that strips new lines
-        (which we want for code blocks)
-        """
-        return res
+    def extract_pyscripts(self, answer: str) -> str:
 
-    def extract_pyscripts(self, answer: str):
+        return [script.group(1) for script in PYSCRIPT_CONTENT.finditer(answer)]
 
-        for script in PYSCRIPT_CONTENT.finditer(answer):
-            self.py_scripts.append(script.group(1))
-
-    def dump_pyscripts(self, out_path: Union[str, os.PathLike] = "out.py") -> None:
+    def combine_pyscripts(self) -> None:
         """
-        Combine returned python scripts into a single file and write out to disk
-        :param out_path: Path to the output python file to write out
+        Combine returned python scripts into a single string for writeout
         """
 
         full_pyscript = ""
         for i, script in enumerate(self.py_scripts, 1):
             full_pyscript += f"# === Chunk {i} ==== \n"
             full_pyscript += script
-            full_pyscript += "\n ================== \n\n"
+            full_pyscript += "\n#==================\n\n"
 
-        with open(out_path, "w") as file:
-            file.write(full_pyscript)
+
+        self.answer = full_pyscript
 
 
     def format_prompt(self) -> list[dict[str, str]]:
@@ -458,7 +430,6 @@ class SASConvertAgent(Agent):
         return out
 
     def reset(self) -> None:
-        self.answer = []
         self.py_scripts = []
         super().reset()
 
