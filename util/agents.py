@@ -23,7 +23,8 @@ from black import FileMode, format_str
 from openai import OpenAI
 
 # Regex to extract python script from OpenAI response
-PYSCRIPT_CONTENT = re.compile(r"```python(.+?)```", re.DOTALL)
+# (allowing multiple cases because GPT-4 isn't consistent)
+PYSCRIPT_CONTENT = re.compile(r"```[pP][ython]*\n(.+?)```", re.DOTALL)
 
 logger = logging.getLogger(__name__)
 
