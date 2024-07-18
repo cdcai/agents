@@ -19,7 +19,6 @@ import gymnasium as gym
 import openai
 import tiktoken
 from azure.identity import ClientSecretCredential
-from black import FileMode, format_str
 from openai import OpenAI
 
 # Regex to extract python script from OpenAI response
@@ -362,18 +361,11 @@ class SASConvertAgent(Agent):
 
         # Attempt to parse python scripts in response
         ret_scripts = self.extract_pyscripts(first_answer)
-        self.scratchpad += f"\n=== First Answer {self.curr_step} =====\n"
+        self.scratchpad += f"\n=== Answer {self.curr_step} =====\n"
         self.scratchpad += "\n".join(ret_scripts)
         self.scratchpad += "\n===================================\n"
 
-        # Send output script to another agent for refinement
-        self.scratchpad += f"\n=== Refined Answer(s) {self.curr_step} =====\n"
-        for script in ret_scripts:
-            refine_agent = PythonRefineAgent(script, self.model_name, self.llm)
-            refine_agent.run()
-            self.py_scripts.append(refine_agent.answer)
-            self.scratchpad += refine_agent.answer
-        self.scratchpad += "\n===================================\n"
+        self.py_scripts.extend(ret_scripts)
 
         # End run
         self.terminated = len(self.question) == 0
@@ -392,7 +384,7 @@ class SASConvertAgent(Agent):
         for i, script in enumerate(self.py_scripts, 1):
             full_pyscript += f"# === Chunk {i} ==== \n"
             full_pyscript += script
-            full_pyscript += "\n#==================\n\n"
+            full_pyscript += "\n"
 
 
         self.answer = full_pyscript
@@ -437,9 +429,10 @@ class SASConvertAgent(Agent):
 class PythonRefineAgent(ToolAwareAgent):
     SYSTEM_PROMPT: str = "You are a coding expert in Python and can identify and correct syntactial mistakes"
     BASE_PROMPT: str = """
-    I have converted part of an existing SAS script into Python. This script may contain small syntax errors, be poorly commented, or have undefined global references.
+    I have converted part of an existing SAS script into Python. Due to length, the script may have been translated in chunks and the results of all chunks combined.
+    This script may contain syntax errors, be poorly commented, have undefined global references, or duplicative or un-used imports.
     Please read this script and provide any corrections that may be needed. Please provide type hints, function docstrings, and guiding comments as needed.
-    You may call the mypy and black tools to check the code. If no changes are needed, provide the script back using the submit tool. Always check the file first before submitting.
+    You may call the mypy and black tools to assist. If no changes are needed, provide the script back using the submit tool. Always check the file first before submitting.
     Please provide ONLY the output code marked in a code block, no additional commentary is needed.
 
     Here is the python file:

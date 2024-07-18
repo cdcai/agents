@@ -6,7 +6,7 @@ from argparse import ArgumentParser
 
 from dotenv import load_dotenv
 
-from util import SASConvertAgent
+from util import SASConvertAgent, PythonRefineAgent
 
 load_dotenv()
 
@@ -38,3 +38,10 @@ if __name__ == "__main__":
 
     with open(args.output, "w") as file:
         file.write(sas_agent.answer)
+    
+    refine_agent = PythonRefineAgent(sas_agent.answer, model_name=args.model)
+
+    refine_agent.run()
+
+    with open(args.output.replace(".py", "_refined.py"), "w") as file:
+        file.write(refine_agent.answer)
