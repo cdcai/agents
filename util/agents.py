@@ -224,7 +224,7 @@ class ToolAwareAgent(Agent):
                     # OpenAI returns as str, which should hopefully eval to dict
                     kwargs : dict[str, any] = tool.function.arguments
 
-                    logger.info(f"Got tool call: {fun}({str(kwargs)[:30] + "..."})")
+                    logger.info(f"Got tool call: {fun}({str(kwargs)[:30] + '...'})")
 
                     tool_result = fun(**kwargs)
                     self.tool_res_payload.append(
