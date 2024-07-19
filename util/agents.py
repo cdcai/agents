@@ -475,12 +475,12 @@ class SASConvertAgent(Agent):
         super().reset()
 
 class PythonRefineAgent(ToolAwareAgent):
-    SYSTEM_PROMPT: str = "You are a coding expert in Python and can identify and correct syntactial mistakes"
+    SYSTEM_PROMPT: str = "You are a Python coding expert and can identify and correct syntactial mistakes and fix incomplete code using standard conventions."
     BASE_PROMPT: str = """
-    I have converted part of an existing SAS script into Python. Due to length, the script may have been translated in chunks and the results of all chunks combined.
-    This script may contain syntax errors, be poorly commented, have undefined global references, or duplicative or un-used imports.
+    I have converted part of an existing SAS script into Python. Due to length, the script may have been translated in chunks and the final results concatenated into a single script.
+    This script may contain syntax errors, be poorly commented, have undefined global references, or duplicative/un-used imports, etc.
     Please read this script and provide any corrections that may be needed. Please provide type hints, function docstrings, and guiding comments as needed.
-    You may call the mypy and black tools to assist. If no changes are needed, provide the script back using the submit tool. Always check the file first before submitting.
+    You may call the mypy and black tools to assist, and you may call both in parallel. If no changes are needed, provide the script back using the submit tool. Always check the file first before submitting.
     Please provide ONLY the output code marked in a code block, no additional commentary is needed.
 
     Here is the python file:
@@ -543,7 +543,7 @@ class PythonRefineAgent(ToolAwareAgent):
         try:
             import black
         except ImportError as e:
-            logger.error("mypy is mising, please install it with `pip install black`")
+            logger.error("black is mising, please install it with `pip install black`")
             raise e
 
         return ToolAwareAgent._subprocess_tool_call_on_file(code, ["black", "--diff"])
