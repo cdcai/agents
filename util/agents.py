@@ -150,7 +150,12 @@ class Agent(metaclass=abc.ABCMeta):
 
 class ToolAwareAgent(Agent):
     """
-    An agent which can utilize tool calls
+    A base-class for an agent which can utilize tool calls.
+    Subclasses would be expected to extend the TOOLS attribute to include additional
+    tools / functions. Each added tool should be appended to the base attribute at init.
+    
+    In addition, each added tool must have a corresponding class method that can be invoked
+    during step() if the GPT calls it.
     """
 
     TOOLS : list[dict] = [
@@ -177,15 +182,14 @@ class ToolAwareAgent(Agent):
     # Payload to send back in subsequent steps
     tool_res_payload : list[dict] = []
 
-    @backoff.on_exception(backoff.expo, json.decoder.JSONDecodeError, max_tries=3, logger=logger)
-    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto"):
+    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto", **oai_kwargs):
         
-        out = super().prompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use)
+        out = super().prompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use, **oai_kwargs)
 
         # attempt to parse tool call arguments
         if out.finish_reason == "tool_calls":
-            for i, tool in enumerate(out.message.tool_calls):
-                out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
+                for i, tool in enumerate(out.message.tool_calls):
+                    out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
 
         return out
     def step(self):
@@ -202,8 +206,25 @@ class ToolAwareAgent(Agent):
         self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input)
         self.scratchpad += "\n===================================\n"
     
-        response = self.prompt_agent(llm_prompt_input)
-
+        # Attempt to query GPT and handle invalid JSON parsing of args
+        response = None
+        n_retry = 3
+        while response is None and n_retry > 0:
+            try:
+                response = self.prompt_agent(llm_prompt_input)
+            except json.decoder.JSONDecodeError as e:
+                logger.warn(f"Tool calls in response couldn't be decoded. {n_retry} retries remaining.")
+                if n_retry == 0:
+                    raise e
+                else:
+                    llm_prompt_input.append(
+                        {
+                            "role": "user",
+                            "content": "The arguments to your previous tool call couldn't be parsed correctly. Please ensure you properly escapse quotes and construct a valid JSON payload."
+                        }
+                    )
+                    n_retry -= 1
+                    continue
         # Append GPT response to next payload
         self.tool_res_payload.append(
             {
@@ -215,6 +236,7 @@ class ToolAwareAgent(Agent):
         if response.finish_reason == "length":
             # Determine if we're truncated
             self.truncated = True
+            logger.warn("Response truncated due to length, Terminating!")
         # Recursive call if tool calls in response
         elif response.finish_reason == "tool_calls":
             for tool in response.message.tool_calls:
@@ -224,7 +246,8 @@ class ToolAwareAgent(Agent):
                     # OpenAI returns as str, which should hopefully eval to dict
                     kwargs : dict[str, any] = tool.function.arguments
 
-                    logger.info(f"Got tool call: {fun}({str(kwargs)[:30] + '...'})")
+                    self.scratchpad += f"=> Requested toolcall: {tool.function.name}({str(kwargs)[:30] + '...'} <=\n"
+                    logger.info(f"Got tool call: {tool.function.name}({str(kwargs)[:30] + '...'})")
 
                     tool_result = fun(**kwargs)
                     self.tool_res_payload.append(
@@ -242,12 +265,14 @@ class ToolAwareAgent(Agent):
         # End Step
         self.curr_step += 1
     
-    def call_submit(self, input: str) -> None:
+    def call_submit(self, input: str, clean: bool = False) -> None:
         """
         Final response call, which terminates further processing
         """
-        out_msg = self.clean_response(input)
+        out_msg = self.clean_response(input) if clean else input
         logger.info(f"Received final response: {out_msg}")
+        self.scratchpad += "===== Answer ==========\n"
+        self.scratchpad += out_msg
         self.answer = out_msg
         self.terminated = True
     
