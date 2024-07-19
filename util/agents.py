@@ -339,6 +339,7 @@ class SASConvertAgent(Agent):
         except:
             self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
+        self.prompt_len = len(self.tokenizer.encode(self.BASE_PROMPT.format(question="") + self.SYSTEM_PROMPT))
         # Also save full input to full_question attribute since we'll
         # overwrite self.question if the resulting payload is too large
         self.full_question = question
@@ -379,23 +380,42 @@ class SASConvertAgent(Agent):
         """
         Combine returned python scripts into a single string for writeout
         """
+        self.answer = "\n".join(self.py_scripts)
 
-        full_pyscript = ""
-        for i, script in enumerate(self.py_scripts, 1):
-            full_pyscript += f"# === Chunk {i} ==== \n"
-            full_pyscript += script
-            full_pyscript += "\n"
+    def fetch_last_translation(self) -> Optional[dict[str, str]]:
+        if len(self.py_scripts):
+            out = {
+                "role": "user",
+                "content": """
+                    Here is the last piece of translated code you produced in a previous step for context:
+                    ```python
+                    {}
+                    ```
+                    """.format(self.py_scripts[-1]).strip()
+            }
+        else:
+            out = None
+        
+        return out
 
-
-        self.answer = full_pyscript
-
+    def get_prompt_len(self) -> int:
+        """
+        Return base prompt length before using fstring to fill in template.
+        (also accounting for possible previous translation context)
+        """
+        if (last_translation_message := self.fetch_last_translation()) is not None:
+            prompt_len = self.prompt_len + len(self.tokenizer.encode(last_translation_message["content"]))
+        else:
+            prompt_len = self.prompt_len
+        
+        return prompt_len
 
     def format_prompt(self) -> list[dict[str, str]]:
         """
         Insert SAS code into prompt, and return list of messages
         to send to chatGPT.
         """
-        prompt_len = len(self.tokenizer.encode(self.BASE_PROMPT.format(question="") + self.SYSTEM_PROMPT))
+        prompt_len = self.get_prompt_len()
 
         # Split by code block
         # (at least one empty line between next code block)
@@ -413,12 +433,15 @@ class SASConvertAgent(Agent):
         self.question = "\n\n".join(reversed(excess_lines))
 
         # Construct query
-        fmt_prompt = re.sub("\s+", " ", self.BASE_PROMPT).format(question="\n\n".join(script_inq))
+        fmt_prompt = re.sub("\s+", " ", self.BASE_PROMPT).format(question="\n\n".join(script_inq)).strip()
         
         out = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
             {"role": "user", "content": fmt_prompt}
         ]
+
+        if (last_translation_message := self.fetch_last_translation()) is not None:
+            out.append(last_translation_message)
 
         return out
 
