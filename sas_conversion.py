@@ -3,7 +3,6 @@ Testing Conversion of SAS files to Python using system of language agents
 """
 import logging
 from argparse import ArgumentParser
-
 from dotenv import load_dotenv
 
 from util import SASConvertAgent, PythonRefineAgent
@@ -32,16 +31,23 @@ if __name__ == "__main__":
     if args.device_code:
         # TODO: Implement
         pass
-    sas_agent = SASConvertAgent(sas_file_content, model_name=args.model)
+
+    sas_agent = SASConvertAgent(sas_file_content, model_name=args.model, chunk_max=3000)
 
     sas_agent.run()
 
     with open(args.output, "w") as file:
         file.write(sas_agent.answer)
-    
+
+    with open("sas_agent_scratchpad.txt", "w") as file:
+        file.write(sas_agent.scratchpad)
+
     refine_agent = PythonRefineAgent(sas_agent.answer, model_name=args.model)
 
     refine_agent.run()
 
     with open(args.output.replace(".py", "_refined.py"), "w") as file:
         file.write(refine_agent.answer)
+
+    with open("python_refine_scratchpad.txt", "w") as file:
+        file.write(refine_agent.scratchpad)
