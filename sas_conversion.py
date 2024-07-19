@@ -5,7 +5,7 @@ import logging
 from argparse import ArgumentParser
 from dotenv import load_dotenv
 
-from util import SASConvertAgent, PythonRefineAgent
+from util import SASConvertAgent, PythonRefineAgent, CodeOutlinerAgent, OutlineSummarizeAgent, PythonSummarizeAgent
 
 load_dotenv()
 
@@ -32,19 +32,22 @@ if __name__ == "__main__":
         # TODO: Implement
         pass
 
-    sas_agent = SASConvertAgent(sas_file_content, model_name=args.model, chunk_max=3000)
+    sas_outline_agent = CodeOutlinerAgent(sas_file_content, model_name=args.model, chunk_max=3000)
+    sas_outline_summary_agent = OutlineSummarizeAgent(sas_outline_agent(), model_name=args.model)
+    sas_agent = SASConvertAgent(sas_file_content, sas_outline_summary_agent(outfile="outline.txt"), model_name=args.model, chunk_max=3000)
+    python_script_combine_agent = PythonSummarizeAgent(sas_agent(), model_name=args.model)
+    refine_agent = PythonRefineAgent(python_script_combine_agent(), model_name=args.model)
 
-    sas_agent.run()
+    refine_agent.run()
 
     with open(args.output, "w") as file:
-        file.write(sas_agent.answer)
+        file.write("\n".join(sas_agent.answer))
+
+    with open(args.output.replace(".py", "summarized.py"), "w") as file:
+        file.write(python_script_combine_agent.answer)
 
     with open("sas_agent_scratchpad.txt", "w") as file:
         file.write(sas_agent.scratchpad)
-
-    refine_agent = PythonRefineAgent(sas_agent.answer, model_name=args.model)
-
-    refine_agent.run()
 
     with open(args.output.replace(".py", "_refined.py"), "w") as file:
         file.write(refine_agent.answer)

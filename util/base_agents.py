@@ -13,7 +13,7 @@ import gymnasium as gym
 import openai
 import tiktoken
 from azure.identity import ClientSecretCredential
-from openai.types.chat import ChatCompletion
+from openai.types.chat.chat_completion import Choice
 
 logger = logging.getLogger(__name__)
 
@@ -50,12 +50,24 @@ class Agent(metaclass=abc.ABCMeta):
             logger.debug(f"Running step {self.curr_step}.")
             self.step()
 
+    def __call__(self, *args, **kwargs) -> str:
+        """
+        Run the underlying agent logic and returns the final answer.
+        """
+        outfile = kwargs.pop("outfile", None)
+
+        self.run(*args, **kwargs)
+
+        if outfile is not None:
+            self.dump(outfile)
+
+        return self.answer
     @abc.abstractmethod
     def step(self):
         raise NotImplementedError()
 
-    @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3, logger=logger)
-    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: int = 100, **oai_kwargs) -> ChatCompletion:
+    @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3)
+    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = 100, **oai_kwargs) -> Choice:
         
         # Prompts should be passed as a list, so handle
         # the case where we just passed a single dict
@@ -96,7 +108,6 @@ class Agent(metaclass=abc.ABCMeta):
     def format_prompt(self, **kwargs) -> str:
         """
         Method which formats the BASE_QUERY string, possibly inserting additional content.
-        This should also implement chunking beha
         """
         raise NotImplementedError()
 
@@ -152,6 +163,35 @@ class Agent(metaclass=abc.ABCMeta):
         ).token
 
         os.environ["AZURE_OPENAI_ENDPOINT"] = os.environ["GPT4_URL"]
+
+class ReduceAgent(Agent):
+    """
+    An agent which reduces a list[str] question to a single string output
+    """
+    question : list[str] = []
+
+    def __init__(self, question: list[str], model_name: str, llm: openai.OpenAI | None = None):
+        super().__init__(question, model_name, llm)
+    def step(self):
+        """
+        This will always be a single-step run to summarize the messages
+        """
+        res = self.prompt_agent(self.get_next_messages(), n_tok=None)
+        self.answer = res.message.content
+        self.terminated = True
+
+    def get_next_messages(self) -> list[dict[str, str]]:
+        out = super().get_next_messages()
+        for msg in self.question:
+            out.append({
+                "role": "assistant",
+                "content": msg
+            })
+        
+        return out
+    def format_prompt(self, **kwargs) -> str:
+        """Return BASE_PROMPT as-is, no templating"""
+        return self.BASE_PROMPT
 
 class ChunkedAgent(Agent):
     """
@@ -228,7 +268,8 @@ class ChunkedAgent(Agent):
 
     def format_prompt(self, split_expr: str = "\n{2,}?", join_str: str = "\n\n", **kwargs) -> str:
         """
-        Formatting BASE_QUERY, checking for output length and chunking if necessary
+        Formatting BASE_QUERY, checking for output length and chunking self.question if necessary
+
         :param split_expr (str): A string or regex to pass to re.split() to split self.question into chunks.
         :param join_str (str): A string to use to recompose chunks of self.question back together.
         
@@ -250,6 +291,24 @@ class ChunkedAgent(Agent):
         self.question = join_str.join(reversed(excess))
 
         return re.sub("\s+", " ", self.BASE_PROMPT).format(question=join_str.join(input_chunks)).strip()
+    
+    def step(self):
+        # Prompt LLM
+        llm_prompt_input = self.get_next_messages()
+        answer = self.prompt_agent(llm_prompt_input, n_tok = 2 * self.chunk_max).message.content
+        self.scratchpad += f"=== Input {self.curr_step} ==========\n"
+        self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input)
+        self.scratchpad += "\n===================================\n"
+        self.scratchpad += f"\n=== Answer {self.curr_step} =====\n"
+        self.scratchpad += answer + "\n"
+        self.scratchpad += "\n===================================\n"
+
+        # Append answer to cache and continue
+        self.answer_cache.append(answer)
+
+        # End run
+        self.terminated = len(self.question) == 0
+        self.curr_step += 1
 
     def run(self, reset: bool = False) -> None:
         super().run(reset)
@@ -418,9 +477,11 @@ class ToolAwareAgent(Agent):
     def _subprocess_tool_call_on_file(tool_input: str, cmd_args: list[str], output_type: Literal["stdout", "file"] = "stdout") -> str:
         """
         A helper function that writes `tool_input` to a file and runs a python module on that file.
+
         :param tool_input (str): A string to pass as input to the tool (this is likely code)
         :param cmd_args (list[str]): Command-line args between the python -m call and the file name (should include the python module to call and any additional arguments)
         :param output_type (str): The output to return (either stdout+error, or contents of the tempfile, if this is modified)
+        
         Returns stdout and stderr concatenated into a string and separated by a newline
         """
         with tempfile.TemporaryFile("w", delete=False) as file:
