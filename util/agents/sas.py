@@ -3,7 +3,7 @@ import re
 
 from openai import OpenAI
 
-from .base import Agent, ReduceAgent, ChunkedAgent, ToolAwareAgent
+from .base import PersistentAgent, ReduceAgent, ChunkedAgent, ToolAwareAgent
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,69 @@ class OutlineSummarizeAgent(ReduceAgent):
     Please read and combine them to produce a detailed summary of the full program described in the same style.
     You should retain all pertinent data so this outline can be used as a guide to write a program from scratch without seeing the underlying script.
     """
+
+class SAStoPythonAgent(PersistentAgent):
+    """
+    A very simple, no frills, SAS -> Python code conversion agent.
+    """
+    SYSTEM_PROMPT : str = "You are an expert at statistical and computer programming and can translate input SAS code to Python. You return only code blocks as output."
+    BASE_PROMPT : str = "Convert the following SAS code into Python code. You may use any library imports necessary to complete the task.\n```sas\n{question}\n```"
+    APPEND_PROMPT : str = "Refine your answer using the following reflections\n{obs}"
+    # Regex to extract python script from OpenAI response
+    # (allowing multiple cases because GPT-4 isn't consistent)
+    PYSCRIPT_CONTENT = re.compile(r"```[pP][ython]*\n(.+?)```", re.DOTALL)
+
+    def step(self):
+        """
+        Full Agent logic. Prompts LLM and saves answer
+        """
+        super().step()
+        # Extract just the Python code from the response
+        self.answer = "\n".join(self.extract_pyscripts(self.answer))
+
+    def format_prompt(self) -> str:
+        return self.BASE_PROMPT.format(question=self.question).strip()
+
+    def extract_pyscripts(self, answer: str) -> list[str]:
+        py_scripts = [script.group(1) for script in self.PYSCRIPT_CONTENT.finditer(answer)]
+        logger.info(f"Extracted {len(py_scripts)} python chunk from response.")
+        
+        return(py_scripts)
+
+class PythonReflexionAgent(PersistentAgent):
+    SYSTEM_PROMPT : str = "You are an advanced reasoning agent that can improve Python code based on self refection."
+    BASE_PROMPT : str = "A languge agent was given a task to translate an ETL/cleaning pipeline from SAS code into Python code. Review the code below and devise a high-level plan to improve the output script using best Python data science coding practices. Use complete sentences.\n{question}"
+    APPEND_PROMPT : str = "The script was modified according to your previous reflections. Review this new code and devise a new plan\n```python\n{obs}\n```"
+
+    def format_prompt(self) -> str:
+        return self.BASE_PROMPT.format(question=self.question).strip()
+
+class PseudocodeSummarizeAgent(ReduceAgent):
+    """
+    An agent which produces whole program pseudocode from several plain-language program outlines
+    """
+    SYSTEM_PROMPT : str = "You are an expert in computer science and can produce legible pseudo-code from plain-text descriptions of computer programs"
+    BASE_PROMPT : str = """
+    The following messages are all technical outlines another AI assistant produced pertaining to sections of the same computer program.
+    Please use these descriptions to re-create the full program being described using pseudo-code. You may generalize functions as necessary, but be sure that all funcationality makes it to the final product.
+    Your output should contain only psuedocode, no plaintext.
+    
+    ex.
+
+    Input: [
+        "The the program defines two integer variables, x = 2 and y = 3",
+        "The program defines a function, sum, that takes two integer parameters, a and b, and adds them together and returns an integer sum"
+        "The program runs the sum() function on x and y and assigns the value to variable z"
+        ]
+
+    Output: ```
+    let x : integer = 2;
+    let y : integer = 3;
+    def sum( x : integer, y : integer) -> integer { return (x + y) } 
+
+    z = sum(x,y)
+    ```
+"""
 
 class PythonSummarizeAgent(ReduceAgent):
     """A simple agent that summarizes the several python scripts already generated"""
@@ -126,9 +189,8 @@ class PythonRefineAgent(ToolAwareAgent):
     SYSTEM_PROMPT: str = "You are a Python coding expert and can identify and correct syntactical mistakes and fix incomplete code using standard conventions."
     BASE_PROMPT: str = """
     I have converted part of an existing SAS script into Python. Due to length, the script may have been translated in chunks and the final results concatenated into a single script.
-    This script may contain syntax errors, be poorly commented, have undefined global references, or duplicative/un-used imports, etc.
     Please read this script and provide any corrections and re-organization as needed. Please also provide type hints, function docstrings, and guiding comments as needed.
-    You may call the mypy and black tools to assist, and you may call both in parallel. 
+    You may call the mypy, black, and ruff tools to assist, and you may call both in parallel. 
     If no changes are needed, provide the script back using the call_submit tool. Always check the file first before submitting your final answer using call_submit.
     Please provide ONLY the output code marked in a code block, no additional commentary is needed.
 
@@ -174,6 +236,24 @@ class PythonRefineAgent(ToolAwareAgent):
                     "required": ["code"]
                 }
             }
+        },
+        # Ruff
+        {
+            "type": "function",
+            "function": {
+                "name": "call_ruff",
+                "description": "Run the ruff python code linter on input python code",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "Python code to check using ruff tool"
+                        }
+                    },
+                    "required": ["code"]
+                }
+            }
         }
     ]
 
@@ -190,6 +270,20 @@ class PythonRefineAgent(ToolAwareAgent):
             raise e
 
         return ToolAwareAgent._subprocess_tool_call_on_file(code, ["black"], output_type="file")
+
+    @staticmethod
+    def call_ruff(code: str) -> str:
+        """
+        Tool usable by language agent to return formatting help from Black
+        :param code: Python code to check against black
+        """
+        try:
+            import ruff
+        except ImportError as e:
+            logger.error("ruff is mising, please install it with `pip install ruff`")
+            raise e
+
+        return ToolAwareAgent._subprocess_tool_call_on_file(code, ["ruff", "check"], output_type="stdout")
 
     @staticmethod
     def call_mypy(code: str) -> str:

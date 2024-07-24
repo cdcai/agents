@@ -70,7 +70,7 @@ class Agent(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3)
-    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = 100, **oai_kwargs) -> Choice:
+    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **oai_kwargs) -> Choice:
         
         # Prompts should be passed as a list, so handle
         # the case where we just passed a single dict
@@ -169,6 +169,47 @@ class Agent(metaclass=abc.ABCMeta):
         ).token
 
         os.environ["AZURE_OPENAI_ENDPOINT"] = os.environ["GPT4_URL"]
+
+class PersistentAgent(Agent):
+    APPEND_PROMPT : str = "{obs}"
+    conversation_cache : list[dict] = []
+
+    def step(self):
+        """
+        Full Agent logic. Prompts LLM and saves answer
+        """
+        llm_prompt_input = self.get_next_messages()
+        response = self.prompt_agent(llm_prompt_input, n_tok=None)
+        answer = response.message.content
+        self.scratchpad += f"=== Input ==========\n"
+        self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input)
+        self.scratchpad += "\n===================================\n"
+        self.scratchpad += f"\n=== Answer =====\n"
+        self.scratchpad += "\n".join(answer) + "\n"
+        self.scratchpad += "\n===================================\n"
+
+        self.answer = answer
+        self.conversation_cache.append({k: response.message.__dict__[k] for k in ["role", "content"]})
+        self.terminated = True
+
+    def format_append_prompt(self, obs: str) -> str:
+        return self.APPEND_PROMPT.format(obs=obs)
+
+    def add_observation(self, obs: str) -> None:
+        """
+        Append new message / observation to message cache
+        This inserts `obs` the `APPEND_PROMPT` attribute and appends to the conversation
+        """
+        self.conversation_cache.append({
+            "role": "user",
+            "content": self.format_append_prompt(obs)
+        })
+
+    def get_next_messages(self) -> list[dict[str, str]]:
+        out = super().get_next_messages()
+        out.extend(self.conversation_cache)
+
+        return(out)
 
 class ReduceAgent(Agent):
     """
