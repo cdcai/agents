@@ -10,7 +10,7 @@ from typing import Literal
 import gymnasium as gym
 import openai
 
-from .base_agents import EnvAgent
+from .base import EnvAgent
 
 logger = logging.getLogger(__name__)
 

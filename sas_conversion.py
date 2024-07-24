@@ -34,23 +34,20 @@ if __name__ == "__main__":
 
     sas_outline_agent = CodeOutlinerAgent(sas_file_content, model_name=args.model, chunk_max=3000)
     sas_outline_summary_agent = OutlineSummarizeAgent(sas_outline_agent(), model_name=args.model)
-    sas_agent = SASConvertAgent(sas_file_content, sas_outline_summary_agent(outfile="outline.txt"), model_name=args.model, chunk_max=3000)
-    python_script_combine_agent = PythonSummarizeAgent(sas_agent(), model_name=args.model)
+    sas_agent = SASConvertAgent(sas_file_content, sas_outline_summary_agent(), model_name=args.model, chunk_max=3000)
+    python_script_combine_agent = PythonSummarizeAgent(sas_agent(outfile="sas_agent_scratchpad.txt"), model_name=args.model)
     refine_agent = PythonRefineAgent(python_script_combine_agent(), model_name=args.model)
 
-    refine_agent.run()
+    refine_agent(outfile="python_refine_scratchpad.txt")
 
+    with open("outline.txt", "w") as file:
+        file.write(sas_outline_summary_agent())
+    
     with open(args.output, "w") as file:
-        file.write("\n".join(sas_agent.answer))
+        file.write("\n".join(sas_agent()))
 
-    with open(args.output.replace(".py", "summarized.py"), "w") as file:
-        file.write(python_script_combine_agent.answer)
-
-    with open("sas_agent_scratchpad.txt", "w") as file:
-        file.write(sas_agent.scratchpad)
+    with open(args.output.replace(".py", "_summarized.py"), "w") as file:
+        file.write(python_script_combine_agent())
 
     with open(args.output.replace(".py", "_refined.py"), "w") as file:
-        file.write(refine_agent.answer)
-
-    with open("python_refine_scratchpad.txt", "w") as file:
-        file.write(refine_agent.scratchpad)
+        file.write(refine_agent())

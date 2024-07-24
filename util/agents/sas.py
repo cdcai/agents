@@ -3,7 +3,7 @@ import re
 
 from openai import OpenAI
 
-from .base_agents import ReduceAgent, ChunkedAgent, ToolAwareAgent
+from .base import Agent, ReduceAgent, ChunkedAgent, ToolAwareAgent
 
 logger = logging.getLogger(__name__)
 
@@ -11,14 +11,26 @@ class OutlineSummarizeAgent(ReduceAgent):
     """
     A simple agent that summarizes all the outlines provided by CodeOutlinerAgent
     """
-    SYSTEM_PROMPT : str = "You are an expert at creating highly technical but succinct summaries of outlines of computer programs"
-    BASE_PROMPT : str = "The following are all technical outlines another AI assistant produced pertaining to parts of the same computer program. Please read them and produce an overall summary of the program described."
+    SYSTEM_PROMPT : str = "You are an expert at creating highly technical and thorough summaries and outlines of computer programs"
+    BASE_PROMPT : str = """
+    The following messages are all technical outlines another AI assistant produced pertaining to sections of the same computer program.
+    Please read and combine them to produce a detailed summary of the full program described in the same style.
+    You should retain all pertinent data so this outline can be used as a guide to write a program from scratch without seeing the underlying script.
+    """
 
 class PythonSummarizeAgent(ReduceAgent):
     """A simple agent that summarizes the several python scripts already generated"""
-    SYSTEM_PROMPT : str = "You are an expert python programmer that reorganize and piece together scripts from their fragments"
-    BASE_PROMPT : str = "A previous AI Agent translated a SAS script into Python in several chunks. Please combine these chunks into a valid python program, reorganizing the scripts as necessary. Please return only the script as output in a ```python block"
-
+    SYSTEM_PROMPT : str = "You are an expert python programmer that can reorganize and piece together a functional script from several fragments"
+    BASE_PROMPT : str = "A previous AI Agent translated a SAS script into Python in several chunks. Please combine all these chunks into a single valid python program. Please ensure that all the pieces are incorperated in the final script. Please return only the script as output in a ```python block"
+    
+    def get_next_messages(self) -> list[dict[str, str]]:
+        out = super().get_next_messages()
+        out.append({
+            "role": "assistant",
+            "content": "\n".join(self.question)
+        })
+        
+        return out
 class CodeOutlinerAgent(ChunkedAgent):
     """
     A language agent which, given input code, provides an outline of inputs, outputs, and transformations in plain language

@@ -53,6 +53,9 @@ class Agent(metaclass=abc.ABCMeta):
     def __call__(self, *args, **kwargs) -> str:
         """
         Run the underlying agent logic and returns the final answer.
+
+        :param reset (bool): Passed to run(), whether to reset agent state (else, will return previous answer on subsequent runs)
+        :param outfile (str): Passed to dump(), file to dump the full scratchpad
         """
         outfile = kwargs.pop("outfile", None)
 
@@ -102,6 +105,9 @@ class Agent(metaclass=abc.ABCMeta):
         out = res.choices[0]
         logger.info(f"Received response: {out.message.content}")
 
+        if out.finish_reason == "length":
+            self.truncated = True
+            logger.warn("Message returned truncated.")
         return out
 
     @abc.abstractmethod
@@ -182,11 +188,10 @@ class ReduceAgent(Agent):
 
     def get_next_messages(self) -> list[dict[str, str]]:
         out = super().get_next_messages()
-        for msg in self.question:
-            out.append({
-                "role": "assistant",
-                "content": msg
-            })
+        out.append({
+            "role": "assistant",
+            "content": "\n".join(self.question)
+        })
         
         return out
     def format_prompt(self, **kwargs) -> str:
@@ -364,8 +369,8 @@ class ToolAwareAgent(Agent):
 
         # attempt to parse tool call arguments
         if out.finish_reason == "tool_calls":
-                for i, tool in enumerate(out.message.tool_calls):
-                    out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
+            for i, tool in enumerate(out.message.tool_calls):
+                out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
 
         return out
 
@@ -424,10 +429,10 @@ class ToolAwareAgent(Agent):
             try:
                 response = self.prompt_agent(llm_prompt_input)
             except json.decoder.JSONDecodeError as e:
-                logger.warn(f"Tool calls in response couldn't be decoded. {n_retry} retries remaining.")
                 if n_retry == 0:
                     raise e
                 else:
+                    logger.warn(f"Tool calls in response couldn't be decoded. {n_retry} retries remaining.")
                     llm_prompt_input.append(
                         {
                             "role": "user",
@@ -476,13 +481,13 @@ class ToolAwareAgent(Agent):
     @staticmethod
     def _subprocess_tool_call_on_file(tool_input: str, cmd_args: list[str], output_type: Literal["stdout", "file"] = "stdout") -> str:
         """
-        A helper function that writes `tool_input` to a file and runs a python module on that file.
+        A helper function that writes `tool_input` to a file and runs a python module on that file, either returning stdout+stderr or the contents of the file after the subprocess call.
 
         :param tool_input (str): A string to pass as input to the tool (this is likely code)
         :param cmd_args (list[str]): Command-line args between the python -m call and the file name (should include the python module to call and any additional arguments)
         :param output_type (str): The output to return (either stdout+error, or contents of the tempfile, if this is modified)
         
-        Returns stdout and stderr concatenated into a string and separated by a newline
+        :return: Either stdout and stderr concatenated into a string and separated by a newline, or `tool_input` after calling the python module
         """
         with tempfile.TemporaryFile("w", delete=False) as file:
             file.write(tool_input)
