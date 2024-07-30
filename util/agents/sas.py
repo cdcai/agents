@@ -22,8 +22,8 @@ class SAStoPythonAgent(PersistentAgent):
     """
     A very simple, no frills, SAS -> Python code conversion agent.
     """
-    SYSTEM_PROMPT : str = "You are an expert at statistical and computer programming and can translate input SAS code to Python. You return only code blocks as output."
-    BASE_PROMPT : str = "Convert the following SAS code into Python code. You may use any library imports necessary to complete the task.\n```sas\n{question}\n```"
+    SYSTEM_PROMPT : str = "You are an expert at statistical and computer programming and can translate input SAS code to Python. You return only code as output."
+    BASE_PROMPT : str = "Convert the following SAS code into Python code. This is part of a larger script and you may only see on piece at a time. Attempt to convert all code, even if it's highly reliant on input data. You may use any library imports necessary to complete the task.\n```sas\n{question}\n```"
     APPEND_PROMPT : str = "Refine your answer using the following reflections\n{obs}"
     # Regex to extract python script from OpenAI response
     # (allowing multiple cases because GPT-4 isn't consistent)

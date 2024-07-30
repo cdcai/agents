@@ -72,6 +72,9 @@ class Agent(metaclass=abc.ABCMeta):
     @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3)
     def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **oai_kwargs) -> Choice:
         
+        # Take temperature arg if over-riding, else use 0
+        temp = oai_kwargs.pop("temperature", 0)
+
         # Prompts should be passed as a list, so handle
         # the case where we just passed a single dict
         if isinstance(prompt, dict):
@@ -79,7 +82,7 @@ class Agent(metaclass=abc.ABCMeta):
 
         try:
             res = self.llm.chat.completions.create(
-                messages=prompt, model=self.model_name, max_tokens=n_tok,
+                messages=prompt, model=self.model_name, max_tokens=n_tok, temperature=temp,
                 **oai_kwargs
             )
         except openai.AuthenticationError:
@@ -172,7 +175,11 @@ class Agent(metaclass=abc.ABCMeta):
 
 class PersistentAgent(Agent):
     APPEND_PROMPT : str = "{obs}"
-    conversation_cache : list[dict] = []
+    conversation_cache : list[dict]
+
+    def reset(self) -> None:
+        self.conversation_cache = []
+        return super().reset()
 
     def step(self):
         """
@@ -215,9 +222,10 @@ class ReduceAgent(Agent):
     """
     An agent which reduces a list[str] question to a single string output
     """
-    question : list[str] = []
+    question : list[str]
 
     def __init__(self, question: list[str], model_name: str, llm: openai.OpenAI | None = None):
+        self.question = []
         super().__init__(question, model_name, llm)
     def step(self):
         """

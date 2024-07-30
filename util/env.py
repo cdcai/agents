@@ -34,6 +34,7 @@ class WikiQAEnv(gym.Env):
         """
         One step running the environment
         """
+        reward : bool = False
         action_type, arg = self.parse_action(action)
 
         logger.debug(f"Step {self.curr_step}: got action, {action_type}; arg {arg}")
@@ -41,7 +42,7 @@ class WikiQAEnv(gym.Env):
         if action_type == "Finish":
             self.answer = arg
 
-            if self.is_correct():
+            if reward := self.is_correct():
                 obs = "Answer is CORRECT"
             else:
                 obs = "Answer is INCORRECT"
@@ -67,7 +68,6 @@ class WikiQAEnv(gym.Env):
         else:
             obs = "Invalid Action. Valid Actions are Lookup[<topic>] Search[<topic>] and Finish[<answer>]."
 
-        reward = self.is_correct()
         terminated = self.terminated
         truncated = self.is_truncated()
 
@@ -114,3 +114,23 @@ class WikiQAEnv(gym.Env):
             return text.lower()
 
         return white_space_fix(remove_articles(remove_punc(lower(ans))))
+
+class WikiQAEnvActive(WikiQAEnv):
+    """
+    WikiQA Gymnasium with a Human-in-the-loop to judge whether response is correct
+    when evaluating final anwser
+    """
+    def is_correct(self) -> bool:
+        res = input(f"===Answer===\n{self.normalize_answer(self.answer)}\n===\nIs answer correct? ([T]rue, [F]alse)").lower()
+        
+        while True:
+            if res in ["true", "t"]:
+                res_bool = True
+                break
+            elif res in ["false", "f"]:
+                res_bool = False
+                break
+            else:
+                res = input("Invalid option, please return either [t]rue/[f]alse").lower().strip()
+
+        return res_bool
