@@ -3,7 +3,7 @@ import os
 import logging
 
 import openai
-from azure.identity import ClientSecretCredential
+from azure.identity import DeviceCodeCredential
 from dotenv import load_dotenv
 
 import util
@@ -11,18 +11,12 @@ import util
 load_dotenv()
 
 # === Service Principal auth ========================
-credential = ClientSecretCredential(
-    tenant_id=os.environ["SP_TENANT_ID"],
-    client_id=os.environ["SP_CLIENT_ID"],
-    client_secret=os.environ["SP_CLIENT_SECRET"],
-)
-
+# === Get creds, set env vars =================================
+credential = DeviceCodeCredential()
 os.environ["AZURE_OPENAI_API_KEY"] = credential.get_token(
     "https://cognitiveservices.azure.com/.default"
 ).token
-
-# openai.api_key = os.environ["AZURE_OPENAI_API_KEY"]
-os.environ["AZURE_OPENAI_ENDPOINT"] = os.environ["GPT4_URL"]
+os.environ["AZURE_OPENAI_ENDPOINT"] = os.getenv("GPT4_URL")
 
 
 def main():
@@ -44,16 +38,8 @@ def main():
         choices=["last_attempt", "reflexion", "last_attempt_reflexion"],
         default="last_attempt_reflexion",
     )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        default=False
-    )
-    parser.add_argument(
-        "--log_path",
-        default="out.log",
-        type=str
-    )
+    parser.add_argument("--debug", action="store_true", default=False)
+    parser.add_argument("--log_path", default="out.log", type=str)
     args = parser.parse_args()
 
     # Add hard-coded example option if none are passed
@@ -138,9 +124,9 @@ Correct answer: Creature Comforts"""
             logger.debug("Trial complete. Full Scratchpad:\n" + agent.scratchpad)
         else:
             print("Trial complete. Full Scratchpad:\n" + agent.scratchpad)
-        
+
         trial_results.append(agent.correct)
-    
+
     print(f"Successful trials: {sum(trial_results)} / {len(trial_results)}")
 
 
