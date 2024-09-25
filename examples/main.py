@@ -6,7 +6,7 @@ import openai
 from azure.identity import DeviceCodeCredential
 from dotenv import load_dotenv
 
-import util
+import agents
 
 load_dotenv()
 
@@ -78,7 +78,7 @@ Correct answer: Creature Comforts"""
         logger.addHandler(handle)
 
     # Initialize environment / gymnasium
-    envir = util.WikiQAEnv(
+    envir = agents.WikiQAEnv(
         question=args.question, truth=args.truth, max_steps=args.n_steps
     )
 
@@ -87,7 +87,7 @@ Correct answer: Creature Comforts"""
 
     # Initialize Agent
     if args.agent == "react":
-        agent = util.ReactAgent(
+        agent = agents.ReactAgent(
             question=args.question,
             examples=examples,
             model_name=args.model,
@@ -95,7 +95,7 @@ Correct answer: Creature Comforts"""
             env=envir,
         )
     elif args.agent == "reflexion":
-        agent = util.ReactandReflectAgent(
+        agent = agents.ReactandReflectAgent(
             question=args.question,
             examples=examples,
             reflection_strategy=args.reflection_strategy,

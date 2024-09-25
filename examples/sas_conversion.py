@@ -5,8 +5,8 @@ import logging
 from argparse import ArgumentParser
 from dotenv import load_dotenv
 
-from util.agents import *
-from util.meta import ChunkedReflexion
+from agents.agent import *
+from agents.meta import ChunkedReflexion
 load_dotenv()
 
 logger = logging.basicConfig(filename="sas_conversion.log", filemode="w", level=logging.INFO)

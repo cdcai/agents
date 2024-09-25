@@ -2,7 +2,7 @@
 Meta-algorithms and arrangements for agent systems
 """
 
-from .agents import Agent, ChunkedAgent, PersistentAgent
+from .agent import Agent, ChunkedAgent, PersistentAgent
 import logging
 import openai
 import re

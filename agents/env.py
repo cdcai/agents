@@ -10,11 +10,13 @@ import string
 from typing import Union
 
 import gymnasium as gym
-from .react import DocstoreExplorer
 from langchain_community.docstore.wikipedia import Wikipedia
+
+from .react import DocstoreExplorer
 from .ssl_tools import no_ssl_verification
 
 logger = logging.getLogger(__name__)
+
 
 class WikiQAEnv(gym.Env):
     def __init__(self, question: str, truth: str, max_steps: int = 6):
@@ -34,7 +36,7 @@ class WikiQAEnv(gym.Env):
         """
         One step running the environment
         """
-        reward : bool = False
+        reward: bool = False
         action_type, arg = self.parse_action(action)
 
         logger.debug(f"Step {self.curr_step}: got action, {action_type}; arg {arg}")
@@ -115,14 +117,18 @@ class WikiQAEnv(gym.Env):
 
         return white_space_fix(remove_articles(remove_punc(lower(ans))))
 
+
 class WikiQAEnvActive(WikiQAEnv):
     """
     WikiQA Gymnasium with a Human-in-the-loop to judge whether response is correct
     when evaluating final anwser
     """
+
     def is_correct(self) -> bool:
-        res = input(f"===Answer===\n{self.normalize_answer(self.answer)}\n===\nIs answer correct? ([T]rue, [F]alse)").lower()
-        
+        res = input(
+            f"===Answer===\n{self.normalize_answer(self.answer)}\n===\nIs answer correct? ([T]rue, [F]alse)"
+        ).lower()
+
         while True:
             if res in ["true", "t"]:
                 res_bool = True
@@ -131,6 +137,10 @@ class WikiQAEnvActive(WikiQAEnv):
                 res_bool = False
                 break
             else:
-                res = input("Invalid option, please return either [t]rue/[f]alse").lower().strip()
+                res = (
+                    input("Invalid option, please return either [t]rue/[f]alse")
+                    .lower()
+                    .strip()
+                )
 
         return res_bool
