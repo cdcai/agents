@@ -12,7 +12,7 @@ from typing import Union
 import gymnasium as gym
 from .react import DocstoreExplorer
 from langchain_community.docstore.wikipedia import Wikipedia
-from .ssl import no_ssl_verification
+from .ssl_tools import no_ssl_verification
 
 logger = logging.getLogger(__name__)
 
