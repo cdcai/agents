@@ -488,22 +488,21 @@ class ToolAwareAgent(Agent):
                     )
                     n_retry -= 1
                     continue
-        # Append GPT response to next payload
-        self.tool_res_payload.append(
-            {
-            "role": "assistant",
-            "content": response.message.content if response.message.content is not None else ""
-            }
-        )
-
-        if response.finish_reason == "length":
-            # Determine if we're truncated
+        if response is None:
+            logger.warning("No response after 3 retries, Terminating!")
             self.truncated = True
-            logger.warn("Response truncated due to length, Terminating!")
-        # Recursive call if tool calls in response
-        elif response.finish_reason == "tool_calls":
-            self._handle_tool_calls(response)
-        
+        else:
+            # Append GPT response to next payload
+            self.tool_res_payload.append(response.message)
+
+            if response.finish_reason == "length":
+                # Determine if we're truncated
+                self.truncated = True
+                logger.warn("Response truncated due to length, Terminating!")
+            # Recursive call if tool calls in response
+            elif response.finish_reason == "tool_calls":
+                self._handle_tool_calls(response)
+            
         # End Step
         self.curr_step += 1
     
