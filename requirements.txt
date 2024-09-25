@@ -7,4 +7,5 @@ langchain-community==0.2.1
 langchain-core==0.2.3
 openai>=1.30.5
 python-dotenv==1.0.1
+tiktoken==0.7.0
 wikipedia==1.4.0
