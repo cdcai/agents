@@ -385,9 +385,8 @@ class ToolAwareAgent(Agent):
     TOOLS : list[dict] = []
     # Will always be added to TOOLS
     # (required to finalize)
-    submit_tool : list[dict] = [
+    submit_tool : dict = {
         # Submit (final response)
-        {
             "type": "function",
             "function": {
                 "name": "call_submit",
@@ -404,13 +403,19 @@ class ToolAwareAgent(Agent):
                 }
             }
         }
-    ]
 
     # Payload to send back in subsequent steps
     tool_res_payload : list[dict] = []
 
-    def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None):
-        self.TOOLS.extend(self.submit_tool)
+    def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None, tools: Optional[Union[dict, list[dict]]] = None, submit_tool: bool = True):
+        if tools is not None:
+            if isinstance(tools, list):
+                self.TOOLS.extend
+            else:
+                self.TOOLS.append(tools)
+        if submit_tool:
+            self.TOOLS.extend(self.submit_tool)
+
         super().__init__(question, model_name, llm)
     def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto", **oai_kwargs):
         
