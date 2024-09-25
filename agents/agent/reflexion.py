@@ -4,100 +4,17 @@ Agents (React & Relexion)
 https://github.com/noahshinn/reflexion
 """
 
-import abc
 import logging
-import os
-from typing import Literal, Union
+from typing import Literal
 
 import gymnasium as gym
 import openai
 
+from .base import EnvAgent
+
 logger = logging.getLogger(__name__)
 
-
-class Agent(metaclass=abc.ABCMeta):
-    correct: bool = False
-    terminated: bool = False
-    truncated: bool = False
-    curr_step: int = 1
-    scratchpad: str = ""
-    BASE_PROMPT: str = ""
-    SYSTEM_PROMPT: str = ""
-
-    def __init__(
-        self, question: str, model_name: str, llm: openai.OpenAI, env: gym.Env
-    ):
-        self.question = question
-        self.llm = llm
-        self.model_name = model_name
-        self.env = env
-        self.reset()
-
-
-    def run(self, reset: bool = False) -> None:
-        if reset:
-            self.reset()
-
-        while not (self.is_terminated() or self.is_truncated()):
-            logger.debug(f"Running step {self.curr_step}.")
-            self.step()
-
-    @abc.abstractmethod
-    def step(self):
-        pass
-
-    def prompt_agent(self, prompt: str, n_tok: int = 100) -> str:
-        logger.debug(f"Sending prompt to LLM:\n{prompt}")
-        try:
-            res = self.llm.chat.completions.create(
-                messages=[prompt], model=self.model_name, max_tokens=n_tok
-            )
-        except Exception as e:
-            # TODO: some error handling here
-            logger.debug(e)
-            raise e
-
-        out_msg = res.choices[0].message
-
-        out = self.clean_response(out_msg.content) + "\n"
-
-        logger.info(f"Received response: {out}")
-        return out
-
-    @abc.abstractmethod
-    def format_prompt(self, **kwargs) -> str:
-        pass
-
-    def is_terminated(self) -> bool:
-        return self.terminated
-
-    def is_truncated(self) -> bool:
-        # NOTE: I think they also checked that prompt length
-        # was under a certain value here, but that'd mean
-        # importing tiktoken and computing it each step
-        return self.truncated and not self.correct
-
-    def reset(self) -> None:
-        self.scratchpad = ""
-        self.curr_step = 1
-        self.truncated = False
-        self.terminated = False
-        self.correct = False
-        self.env.reset()
-
-    def dump(self, outfile: Union[str, os.PathLike]) -> None:
-        """
-        Dump scratchfile to disk
-        """
-        with open(outfile, "w", encoding="utf-8") as file:
-            file.writelines(elem + "\n" for elem in self.scratchpad.split("\n"))
-
-    @staticmethod
-    def clean_response(res: str) -> str:
-        out = res.strip('\n').strip().replace('\n', '')
-        return out
-
-class ReactAgent(Agent):
+class ReactAgent(EnvAgent):
     BASE_PROMPT = """Solve a question answering task with interleaving Thought, Action, Observation steps.
     Thought can reason about the current situation, and Action can be three types: 
     (1) Search[entity], which searches the exact entity on Wikipedia and returns the first paragraph if it exists. If not, it will return some similar entities to search.
@@ -137,7 +54,7 @@ class ReactAgent(Agent):
         # Act
         logger.info("getting action...")
         self.scratchpad += f"\nAct {self.curr_step}: "
-        action = self.prompt_agent(self.format_prompt())
+        action = self.prompt_agent(self.get_next_messages())
         self.scratchpad += action
 
         # Observe
@@ -148,16 +65,14 @@ class ReactAgent(Agent):
         )
         self.scratchpad += obs + "\n"
 
-    def format_prompt(self) -> dict[str, str]:
+    def format_prompt(self) -> str:
         """
         Format the base prompt with dynamic content
         using f-string plus kwargs
         """
-        fmt_prompt = self.BASE_PROMPT.format(
+        return self.BASE_PROMPT.format(
             examples=self.examples, question=self.question, scratchpad=self.scratchpad
         )
-
-        return {"role": "user", "content": fmt_prompt}
 
 
 class ReactandReflectAgent(ReactAgent):
@@ -215,19 +130,17 @@ Reflection:"""
 
         super().run(reset)
 
-    def format_prompt(self) -> dict[str, str]:
+    def format_prompt(self) -> str:
         """
         Format the base prompt with dynamic content
         using f-string plus kwargs
         """
-        fmt_prompt = self.BASE_PROMPT.format(
+        return self.BASE_PROMPT.format(
             examples=self.examples,
             question=self.question,
             scratchpad=self.scratchpad,
             reflections=self.reflection_str
         )
-
-        return {"role": "user", "content": fmt_prompt}
 
     def format_reflection_prompt(self) -> dict[str, str]:
         """
