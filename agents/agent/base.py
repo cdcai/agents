@@ -69,7 +69,7 @@ class Agent(metaclass=abc.ABCMeta):
     def step(self):
         raise NotImplementedError()
 
-    @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3)
+    @backoff.on_exception(backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3)
     def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **oai_kwargs) -> Choice:
         
         # Take temperature arg if over-riding, else use 0
@@ -92,14 +92,7 @@ class Agent(metaclass=abc.ABCMeta):
             if isinstance(self.llm, openai.AzureOpenAI):
                 self.authenticate()
                 self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
-                res = self.llm.chat.completions.create(
-                    messages=prompt,
-                    model=self.model_name,
-                    max_tokens=n_tok,
-                    **oai_kwargs
-                )
-            else:
-                raise e
+            raise e
         except Exception as e:
             # TODO: some error handling here
             logger.debug(e)
