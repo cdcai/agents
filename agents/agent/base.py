@@ -28,7 +28,7 @@ class Agent(metaclass=abc.ABCMeta):
     SYSTEM_PROMPT: str = ""
 
     def __init__(
-        self, question: str, model_name: str, llm: Optional[openai.OpenAI] = None
+        self, question: str, model_name: str, llm: Optional[openai.OpenAI] = None, **oai_kwargs
     ):
         self.question = question
 
@@ -40,6 +40,7 @@ class Agent(metaclass=abc.ABCMeta):
         else:
             self.llm = llm
         self.model_name = model_name
+        self.oai_kwargs = oai_kwargs
         self.reset()
 
     def run(self, reset: bool = False) -> None:
@@ -70,10 +71,19 @@ class Agent(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @backoff.on_exception(backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3)
-    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **oai_kwargs) -> Choice:
+    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **addn_oai_kwargs) -> Choice:
+        """
+        The main OAI prompting logic.
+
+        :param prompt: Either a dict or a list of dicts representing the message(s) to send to OAI model
+        :param n_tok: An optional maximum token length to request of the model response
+        :param addn_oai_kwargs: Key word arguments passed to completions.create() call (tool calls, etc.)
+
+        :return: An openAI Choice response object
+        """
         
         # Take temperature arg if over-riding, else use 0
-        temp = oai_kwargs.pop("temperature", 0)
+        temp = self.oai_kwargs.get("temperature", 0)
 
         # Prompts should be passed as a list, so handle
         # the case where we just passed a single dict
@@ -83,7 +93,8 @@ class Agent(metaclass=abc.ABCMeta):
         try:
             res = self.llm.chat.completions.create(
                 messages=prompt, model=self.model_name, max_tokens=n_tok, temperature=temp,
-                **oai_kwargs
+                **addn_oai_kwargs,
+                **self.oai_kwargs
             )
         except openai.AuthenticationError:
             logger.info("Auth failed, attempting to re-authenticate before retrying")
@@ -217,9 +228,9 @@ class ReduceAgent(Agent):
     """
     question : list[str]
 
-    def __init__(self, question: list[str], model_name: str, llm: openai.OpenAI | None = None):
+    def __init__(self, question: list[str], model_name: str, llm: openai.OpenAI | None = None, **oai_kwargs):
         self.question = []
-        super().__init__(question, model_name, llm)
+        super().__init__(question, model_name, llm, **oai_kwargs)
     def step(self):
         """
         This will always be a single-step run to summarize the messages
@@ -255,7 +266,7 @@ class ChunkedAgent(Agent):
     full_question : str
     chunk_max : int
 
-    def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None, chunk_max : int = 3000):
+    def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None, chunk_max : int = 3000, **oai_kwargs):
         # Also save full input to full_question attribute since we'll
         # overwrite self.question if the resulting payload is too large
         self.full_question = question
@@ -269,7 +280,7 @@ class ChunkedAgent(Agent):
         # Take the base prompt length before we fstring it
         self.prompt_len = len(self.tokenizer.encode(self.BASE_PROMPT.format(question="") + self.SYSTEM_PROMPT))
         
-        super().__init__(question, model_name, llm)
+        super().__init__(question, model_name, llm, **oai_kwargs)
 
     def combine_answer_cache(self) -> None:
         """
@@ -400,7 +411,7 @@ class ToolAwareAgent(Agent):
     # Payload to send back in subsequent steps
     tool_res_payload : list[dict] = []
 
-    def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None, tools: Optional[Union[dict, list[dict]]] = None, submit_tool: bool = True):
+    def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None, tools: Optional[Union[dict, list[dict]]] = None, submit_tool: bool = True, **oai_kwargs):
         if tools is not None:
             if isinstance(tools, list):
                 self.TOOLS.extend
@@ -409,10 +420,10 @@ class ToolAwareAgent(Agent):
         if submit_tool:
             self.TOOLS.extend(self.submit_tool)
 
-        super().__init__(question, model_name, llm)
-    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto", **oai_kwargs):
+        super().__init__(question, model_name, llm, **oai_kwargs)
+    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto"):
         
-        out = super().prompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use, **oai_kwargs)
+        out = super().prompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use)
 
         # attempt to parse tool call arguments
         if out.finish_reason == "tool_calls":
