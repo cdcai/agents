@@ -40,7 +40,10 @@ class Agent(metaclass=abc.ABCMeta):
         # we could also use something else as long as it follows the OpenAI API
         if llm is None:
             self.authenticate()
-            self.llm = openai.AzureOpenAI()
+            if self.parallel:
+                self.llm = openai.AsyncAzureOpenAI()
+            else:
+                self.llm = openai.AzureOpenAI()
         else:
             self.llm = llm
         self.model_name = model_name
@@ -92,7 +95,7 @@ class Agent(metaclass=abc.ABCMeta):
             prompt = [prompt]
 
         try:
-            res = await self.llm.chat.completions.acreate(
+            res = await self.llm.chat.completions.create(
                 messages=prompt, model=self.model_name, max_tokens=n_tok,
                 **addn_oai_kwargs,
                 **self.oai_kwargs
