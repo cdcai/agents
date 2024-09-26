@@ -421,7 +421,7 @@ class ToolAwareAgent(Agent):
         self.tool_res_payload = []
         if tools is not None:
             if isinstance(tools, list):
-                self.TOOLS.extend
+                self.TOOLS.extend(tools)
             else:
                 self.TOOLS.append(tools)
         if submit_tool:
