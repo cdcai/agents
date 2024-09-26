@@ -476,8 +476,7 @@ class ToolAwareAgent(Agent):
                 self.tool_res_payload.append(
                     {
                         "tool_call_id": tool.id,
-                        "role": "function",
-                        "name": tool.function.name,
+                        "role": "tool",
                         "content": tool_result
                     }
                 )
