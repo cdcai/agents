@@ -13,7 +13,7 @@ import gymnasium as gym
 import openai
 import tiktoken
 from azure.identity import ClientSecretCredential
-from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion import Choice, ChatCompletionMessage
 
 logger = logging.getLogger(__name__)
 
@@ -485,7 +485,7 @@ class ToolAwareAgent(Agent):
 
         # Send off messages for reply
         self.scratchpad += f"=== Input {self.curr_step} ==========\n"
-        self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input)
+        self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input if not isinstance(msg, ChatCompletionMessage))
         self.scratchpad += "\n===================================\n"
     
         # Attempt to query GPT and handle invalid JSON parsing of args
