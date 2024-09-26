@@ -26,7 +26,9 @@ class Agent(metaclass=abc.ABCMeta):
     answer: str = ""
     BASE_PROMPT: str = ""
     SYSTEM_PROMPT: str = ""
-
+    oai_kwargs : dict = {
+        "temperature": 0.0
+    }
     def __init__(
         self, question: str, model_name: str, llm: Optional[openai.OpenAI] = None, **oai_kwargs
     ):
@@ -40,7 +42,7 @@ class Agent(metaclass=abc.ABCMeta):
         else:
             self.llm = llm
         self.model_name = model_name
-        self.oai_kwargs = oai_kwargs
+        self.oai_kwargs.update(oai_kwargs)
         self.reset()
 
     def run(self, reset: bool = False) -> None:
@@ -81,9 +83,6 @@ class Agent(metaclass=abc.ABCMeta):
 
         :return: An openAI Choice response object
         """
-        
-        # Take temperature arg if over-riding, else use 0
-        temp = self.oai_kwargs.get("temperature", 0)
 
         # Prompts should be passed as a list, so handle
         # the case where we just passed a single dict
@@ -92,7 +91,7 @@ class Agent(metaclass=abc.ABCMeta):
 
         try:
             res = self.llm.chat.completions.create(
-                messages=prompt, model=self.model_name, max_tokens=n_tok, temperature=temp,
+                messages=prompt, model=self.model_name, max_tokens=n_tok,
                 **addn_oai_kwargs,
                 **self.oai_kwargs
             )
