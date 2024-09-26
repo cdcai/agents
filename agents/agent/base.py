@@ -425,14 +425,20 @@ class ToolAwareAgent(Agent):
             self.TOOLS.extend(self.submit_tool)
 
         super().__init__(question, model_name, llm, **oai_kwargs)
+
     def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto"):
         
         out = super().prompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use)
 
-        # attempt to parse tool call arguments
-        if out.finish_reason == "tool_calls":
-            for i, tool in enumerate(out.message.tool_calls):
-                out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
+        if out is not None:
+            # Append GPT response to next payload
+            # NOTE: This has to come before the next step of parsing
+            self.tool_res_payload.append(out.message)
+
+            # attempt to parse tool call arguments
+            if out.finish_reason == "tool_calls":
+                for i, tool in enumerate(out.message.tool_calls):
+                    out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
 
         return out
 
@@ -511,9 +517,6 @@ class ToolAwareAgent(Agent):
             logger.warning("No response after 3 retries, Terminating!")
             self.truncated = True
         else:
-            # Append GPT response to next payload
-            self.tool_res_payload.append(response.message)
-
             if response.finish_reason == "length":
                 # Determine if we're truncated
                 self.truncated = True
