@@ -478,7 +478,7 @@ class ToolAwareAgent(Agent):
                         "tool_call_id": tool.id,
                         "role": "function",
                         "name": tool.function.name,
-                        "content": tool_result
+                        "output": tool_result
                     }
                 )
             except Exception as e:
