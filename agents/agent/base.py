@@ -121,12 +121,14 @@ class Agent(metaclass=abc.ABCMeta):
     def format_prompt(self, **kwargs) -> str:
         """
         Method which formats the BASE_QUERY string, possibly inserting additional content.
+        This is usually called within get_next_message() to populate the first user message.
         """
         raise NotImplementedError()
 
     def get_next_messages(self) -> list[dict[str, str]]:
         """
-        Retrieve next message payload for GPT prompting
+        Retrieve next message payload for GPT prompting.
+        This defaults to only the SYSTEM_PROMPT and the formatted BASE_PROMPT via format_prompt()
         """
         out = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
@@ -141,6 +143,9 @@ class Agent(metaclass=abc.ABCMeta):
         return self.truncated
 
     def reset(self) -> None:
+        """
+        Reset agent state for a re-run
+        """
         self.scratchpad = ""
         self.answer = ""
         self.curr_step = 1
@@ -443,9 +448,13 @@ class ToolAwareAgent(Agent):
         
         return out
     
-    def _handle_tool_calls(self, response):
+    def _handle_tool_calls(self, response: Choice):
         """
         Handle all tool calls in response object
+        
+        This gets a method within this class by name and evaluates it with the arguments provided by openai.
+
+        The output of that method is appended to a new message in the tool_res_payload list, for downstream querying.
         """
         for tool in response.message.tool_calls:
             # Try to call tool, if present, else raise.
