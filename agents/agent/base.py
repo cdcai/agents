@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Callable, Literal, Optional, Union
+from copy import copy
 
 import backoff
 import gymnasium as gym
@@ -433,7 +434,7 @@ class ToolAwareAgent(Agent):
         if out is not None:
             # Append GPT response to next payload
             # NOTE: This has to come before the next step of parsing
-            self.tool_res_payload.append(out.message)
+            self.tool_res_payload.append(copy(out.message))
 
             # attempt to parse tool call arguments
             if out.finish_reason == "tool_calls":
