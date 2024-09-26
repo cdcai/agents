@@ -5,5 +5,7 @@ langchain==0.2.1
 langchain-community==0.2.1
 langchain-core==0.2.3
 openai>=1.30.5
+polars>=1.6.0
+pydantic>=2.9.2
 python-dotenv==1.0.1
 wikipedia==1.4.0
