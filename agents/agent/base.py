@@ -1,4 +1,5 @@
 import abc
+import asyncio
 import json
 import logging
 import os
@@ -31,10 +32,10 @@ class Agent(metaclass=abc.ABCMeta):
         "temperature": 0.0
     }
     def __init__(
-        self, question: str, model_name: str, llm: Optional[openai.OpenAI] = None, **oai_kwargs
+        self, question: str, model_name: str, llm: Optional[openai.OpenAI] = None, parallel: bool = False, **oai_kwargs
     ):
         self.question = question
-
+        self.parallel = parallel
         # We default to Azure OpenAI here, but
         # we could also use something else as long as it follows the OpenAI API
         if llm is None:
@@ -73,6 +74,50 @@ class Agent(metaclass=abc.ABCMeta):
     def step(self):
         raise NotImplementedError()
 
+    @backoff.on_exception(backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3)
+    async def aprompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **addn_oai_kwargs) -> Choice:
+        """
+        An async version of the main OAI prompting logic.
+
+        :param prompt: Either a dict or a list of dicts representing the message(s) to send to OAI model
+        :param n_tok: An optional maximum token length to request of the model response
+        :param addn_oai_kwargs: Key word arguments passed to completions.create() call (tool calls, etc.)
+
+        :return: An openAI Choice response object
+        """
+
+        # Prompts should be passed as a list, so handle
+        # the case where we just passed a single dict
+        if isinstance(prompt, dict):
+            prompt = [prompt]
+
+        try:
+            res = await self.llm.chat.completions.acreate(
+                messages=prompt, model=self.model_name, max_tokens=n_tok,
+                **addn_oai_kwargs,
+                **self.oai_kwargs
+            )
+        except openai.AuthenticationError:
+            logger.info("Auth failed, attempting to re-authenticate before retrying")
+            # HACK: This isn't terrific, but it should work for
+            # our current use case (Azure OpenAI with service principal/User creds)
+            if isinstance(self.llm, openai.AzureOpenAI):
+                self.authenticate()
+                self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
+            raise e
+        except Exception as e:
+            # TODO: some error handling here
+            logger.debug(e)
+            raise e
+
+        out = res.choices[0]
+        logger.info(f"Received response: {out.message.content}")
+
+        if out.finish_reason == "length":
+            self.truncated = True
+            logger.warn("Message returned truncated.")
+        return out
+ 
     @backoff.on_exception(backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3)
     def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **addn_oai_kwargs) -> Choice:
         """
@@ -416,7 +461,7 @@ class ToolAwareAgent(Agent):
     # Payload to send back in subsequent steps
     tool_res_payload : list[dict]
 
-    def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None, tools: Optional[Union[dict, list[dict]]] = None, submit_tool: bool = True, **oai_kwargs):
+    def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None, tools: Optional[Union[dict, list[dict]]] = None, submit_tool: bool = True, parallel: bool = False, **oai_kwargs):
         self.TOOLS = []
         self.tool_res_payload = []
         if tools is not None:
@@ -427,11 +472,14 @@ class ToolAwareAgent(Agent):
         if submit_tool:
             self.TOOLS.extend(self.submit_tool)
 
-        super().__init__(question, model_name, llm, **oai_kwargs)
+        super().__init__(question, model_name, llm, parallel=parallel, **oai_kwargs)
 
     def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto"):
         
-        out = super().prompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use)
+        if self.parallel:
+            out = asyncio.run(super().aprompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use))
+        else:
+            out = super().prompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use)
 
         if out is not None:
             # Append GPT response to next payload

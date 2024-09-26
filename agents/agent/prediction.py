@@ -30,6 +30,7 @@ class PredictionAgent(ToolAwareAgent):
         df: pl.DataFrame,
         labels: list[str],
         llm: openai.OpenAI | None = None,
+        parallel: bool = False,
         **oai_kwargs,
     ):
         """
@@ -56,6 +57,7 @@ class PredictionAgent(ToolAwareAgent):
             llm=llm,
             tools=self.response_tool,
             submit_tool=False,
+            parallel=parallel,
             **oai_kwargs,
         )
 
