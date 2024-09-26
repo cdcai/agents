@@ -480,7 +480,11 @@ class ToolAwareAgent(Agent):
     def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto"):
         
         if self.parallel:
-            out = asyncio.run(super().aprompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use))
+            try:
+                out = asyncio.run(super().aprompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use))
+            except Exception as err:
+                logger.debug(f"error during async eval: {str(err)}")
+                raise err
         else:
             out = super().prompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use)
 
