@@ -391,7 +391,7 @@ class ToolAwareAgent(Agent):
     during step() if the GPT calls it.
     """
 
-    TOOLS : list[dict] = []
+    TOOLS : list[dict]
     # Will always be added to TOOLS
     # (required to finalize)
     submit_tool : dict = {
@@ -414,9 +414,11 @@ class ToolAwareAgent(Agent):
         }
 
     # Payload to send back in subsequent steps
-    tool_res_payload : list[dict] = []
+    tool_res_payload : list[dict]
 
     def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None, tools: Optional[Union[dict, list[dict]]] = None, submit_tool: bool = True, **oai_kwargs):
+        self.TOOLS = []
+        self.tool_res_payload = []
         if tools is not None:
             if isinstance(tools, list):
                 self.TOOLS.extend
