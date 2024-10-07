@@ -481,7 +481,7 @@ class ToolAwareAgent(Agent):
         
         if self.parallel:
             try:
-                out = asyncio.run(super().aprompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use))
+                out = asyncio.run_coroutine_threadsafe(super().aprompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use), asyncio.get_running_loop())
             except Exception as err:
                 logger.debug(f"error during async eval: {str(err)}")
                 raise err
