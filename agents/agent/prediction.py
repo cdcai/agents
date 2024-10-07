@@ -21,7 +21,6 @@ class PredictionAgent(ToolAwareAgent):
     """
 
     answer: list[str]
-
     def __init__(
         self,
         prompt: str,
@@ -30,7 +29,6 @@ class PredictionAgent(ToolAwareAgent):
         df: pl.DataFrame,
         labels: list[str],
         llm: openai.OpenAI | None = None,
-        parallel: bool = False,
         **oai_kwargs,
     ):
         """
@@ -57,7 +55,7 @@ class PredictionAgent(ToolAwareAgent):
             llm=llm,
             tools=self.response_tool,
             submit_tool=False,
-            parallel=parallel,
+            parallel=self.parallel,
             **oai_kwargs,
         )
 
@@ -135,6 +133,28 @@ class PredictionAgent(ToolAwareAgent):
             for _ in range(steps):
                 logger.debug(f"Running step {self.curr_step}.")
                 self.step()
+                if self.is_terminated() or self.is_truncated():
+                    break
+        else:
+            super().run(reset)
+
+class AsyncPredictionAgent(PredictionAgent):
+    """
+    Asyncio variant of PredictionAgent class
+    run() or __call__ should be managed as an async co-routine
+    """
+    parallel: bool = True
+    async def run(self, reset: bool = False, steps: Optional[int] = None) -> None:
+        """
+        Run the agent, optionally running only a fixed number of steps
+        """
+        if reset:
+            self.reset()
+
+        if steps is not None:
+            for _ in range(steps):
+                logger.debug(f"Running step {self.curr_step}.")
+                await self.step()
                 if self.is_terminated() or self.is_truncated():
                     break
         else:
