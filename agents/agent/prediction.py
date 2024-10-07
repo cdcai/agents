@@ -55,8 +55,7 @@ class PredictionAgent(ToolAwareAgent):
             llm=llm,
             tools=self.response_tool,
             submit_tool=False,
-            parallel=self.parallel,
-            **oai_kwargs,
+            **oai_kwargs
         )
 
     def _build_pydantic_model(self):
