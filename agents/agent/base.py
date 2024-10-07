@@ -476,7 +476,7 @@ class ToolAwareAgent(Agent):
         if submit_tool:
             self.TOOLS.extend(self.submit_tool)
 
-        super().__init__(question, model_name, llm, parallel=self.parallel **oai_kwargs)
+        super().__init__(question, model_name, llm, parallel=self.parallel, **oai_kwargs)
 
     def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto"):
         
