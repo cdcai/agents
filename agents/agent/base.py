@@ -1,5 +1,4 @@
 import abc
-import asyncio
 import json
 import logging
 import os
@@ -32,18 +31,14 @@ class Agent(metaclass=abc.ABCMeta):
         "temperature": 0.0
     }
     def __init__(
-        self, question: str, model_name: str, llm: Optional[openai.OpenAI] = None, parallel: bool = False, **oai_kwargs
+        self, question: str, model_name: str, llm: Optional[openai.OpenAI] = None, **oai_kwargs
     ):
         self.question = question
-        self.parallel = parallel
         # We default to Azure OpenAI here, but
         # we could also use something else as long as it follows the OpenAI API
         if llm is None:
             self.authenticate()
-            if self.parallel:
-                self.llm = openai.AsyncAzureOpenAI()
-            else:
-                self.llm = openai.AzureOpenAI()
+            self.llm = openai.AzureOpenAI()
         else:
             self.llm = llm
         self.model_name = model_name
@@ -463,7 +458,6 @@ class ToolAwareAgent(Agent):
 
     # Payload to send back in subsequent steps
     tool_res_payload : list[dict]
-    parallel : bool = False
 
     def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None, tools: Optional[Union[dict, list[dict]]] = None, submit_tool: bool = True, **oai_kwargs):
         self.TOOLS = []
@@ -476,7 +470,7 @@ class ToolAwareAgent(Agent):
         if submit_tool:
             self.TOOLS.extend(self.submit_tool)
 
-        super().__init__(question, model_name, llm, parallel=self.parallel, **oai_kwargs)
+        super().__init__(question, model_name, llm, **oai_kwargs)
 
     def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto"):
         
@@ -626,91 +620,6 @@ class ToolAwareAgent(Agent):
             else:
                 # Shouldn't be reachable
                 raise NotImplementedError()
-
-class AsyncToolAwareAgent(ToolAwareAgent):
-    parallel : bool = True
-    async def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto"):
-        
-        out = await super().aprompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use)
-
-        if out is not None:
-            # Append GPT response to next payload
-            # NOTE: This has to come before the next step of parsing
-            self.tool_res_payload.append(deepcopy(out.message))
-
-            # attempt to parse tool call arguments
-            if out.finish_reason == "tool_calls":
-                for i, tool in enumerate(out.message.tool_calls):
-                    out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
-
-        return out
-    async def step(self):
-        # Pull base query + system messages
-        # (abstract)
-        llm_prompt_input = self.get_next_messages()
-
-        # Send off messages for reply
-        self.scratchpad += f"=== Input {self.curr_step} ==========\n"
-        self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input if not isinstance(msg, ChatCompletionMessage))
-        self.scratchpad += "\n===================================\n"
-    
-        # Attempt to query GPT and handle invalid JSON parsing of args
-        response = None
-        n_retry = 3
-        while response is None and n_retry > 0:
-            try:
-                response = await self.prompt_agent(llm_prompt_input)
-            except json.decoder.JSONDecodeError as e:
-                if n_retry == 0:
-                    raise e
-                else:
-                    logger.warn(f"Tool calls in response couldn't be decoded. {n_retry} retries remaining.")
-                    llm_prompt_input.append(
-                        {
-                            "role": "user",
-                            "content": "The arguments to your previous tool call couldn't be parsed correctly. Please ensure you properly escapse quotes and construct a valid JSON payload."
-                        }
-                    )
-                    n_retry -= 1
-                    continue
-        if response is None:
-            logger.warning("No response after 3 retries, Terminating!")
-            self.truncated = True
-        else:
-            if response.finish_reason == "length":
-                # Determine if we're truncated
-                self.truncated = True
-                logger.warn("Response truncated due to length, Terminating!")
-            # Recursive call if tool calls in response
-            elif response.finish_reason == "tool_calls":
-                self._handle_tool_calls(response)
-            
-        # End Step
-        self.curr_step += 1
-
-    async def run(self, reset: bool = False) -> None:
-        if reset:
-            self.reset()
-
-        while not (self.is_terminated() or self.is_truncated()):
-            logger.debug(f"Running step {self.curr_step}.")
-            await self.step()
-
-    async def __call__(self, *args, **kwargs) -> str:
-        """
-        Run the underlying agent logic and returns the final answer.
-
-        :param reset (bool): Passed to run(), whether to reset agent state (else, will return previous answer on subsequent runs)
-        :param outfile (str): Passed to dump(), file to dump the full scratchpad
-        """
-        outfile = kwargs.pop("outfile", None)
-
-        await self.run(*args, **kwargs)
-
-        if outfile is not None:
-            self.dump(outfile)
-
-        return self.answer
 
 class EnvAgent(Agent):
     """
