@@ -7,13 +7,14 @@ import subprocess
 import sys
 import tempfile
 from typing import Callable, Literal, Optional, Union
+from copy import deepcopy
 
 import backoff
 import gymnasium as gym
 import openai
 import tiktoken
 from azure.identity import ClientSecretCredential
-from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion import Choice, ChatCompletionMessage
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +27,13 @@ class Agent(metaclass=abc.ABCMeta):
     answer: str = ""
     BASE_PROMPT: str = ""
     SYSTEM_PROMPT: str = ""
-
+    oai_kwargs : dict = {
+        "temperature": 0.0
+    }
     def __init__(
-        self, question: str, model_name: str, llm: Optional[openai.OpenAI] = None
+        self, question: str, model_name: str, llm: Optional[openai.OpenAI] = None, **oai_kwargs
     ):
         self.question = question
-
         # We default to Azure OpenAI here, but
         # we could also use something else as long as it follows the OpenAI API
         if llm is None:
@@ -40,6 +42,7 @@ class Agent(metaclass=abc.ABCMeta):
         else:
             self.llm = llm
         self.model_name = model_name
+        self.oai_kwargs.update(oai_kwargs)
         self.reset()
 
     def run(self, reset: bool = False) -> None:
@@ -69,11 +72,17 @@ class Agent(metaclass=abc.ABCMeta):
     def step(self):
         raise NotImplementedError()
 
-    @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3)
-    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **oai_kwargs) -> Choice:
-        
-        # Take temperature arg if over-riding, else use 0
-        temp = oai_kwargs.pop("temperature", 0)
+    @backoff.on_exception(backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3)
+    async def aprompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **addn_oai_kwargs) -> Choice:
+        """
+        An async version of the main OAI prompting logic.
+
+        :param prompt: Either a dict or a list of dicts representing the message(s) to send to OAI model
+        :param n_tok: An optional maximum token length to request of the model response
+        :param addn_oai_kwargs: Key word arguments passed to completions.create() call (tool calls, etc.)
+
+        :return: An openAI Choice response object
+        """
 
         # Prompts should be passed as a list, so handle
         # the case where we just passed a single dict
@@ -81,9 +90,10 @@ class Agent(metaclass=abc.ABCMeta):
             prompt = [prompt]
 
         try:
-            res = self.llm.chat.completions.create(
-                messages=prompt, model=self.model_name, max_tokens=n_tok, temperature=temp,
-                **oai_kwargs
+            res = await self.llm.chat.completions.create(
+                messages=prompt, model=self.model_name, max_tokens=n_tok,
+                **addn_oai_kwargs,
+                **self.oai_kwargs
             )
         except openai.AuthenticationError:
             logger.info("Auth failed, attempting to re-authenticate before retrying")
@@ -92,14 +102,51 @@ class Agent(metaclass=abc.ABCMeta):
             if isinstance(self.llm, openai.AzureOpenAI):
                 self.authenticate()
                 self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
-                res = self.llm.chat.completions.create(
-                    messages=prompt,
-                    model=self.model_name,
-                    max_tokens=n_tok,
-                    **oai_kwargs
-                )
-            else:
-                raise e
+            raise e
+        except Exception as e:
+            # TODO: some error handling here
+            logger.debug(e)
+            raise e
+
+        out = res.choices[0]
+        logger.info(f"Received response: {out.message.content}")
+
+        if out.finish_reason == "length":
+            self.truncated = True
+            logger.warn("Message returned truncated.")
+        return out
+ 
+    @backoff.on_exception(backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3)
+    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **addn_oai_kwargs) -> Choice:
+        """
+        The main OAI prompting logic.
+
+        :param prompt: Either a dict or a list of dicts representing the message(s) to send to OAI model
+        :param n_tok: An optional maximum token length to request of the model response
+        :param addn_oai_kwargs: Key word arguments passed to completions.create() call (tool calls, etc.)
+
+        :return: An openAI Choice response object
+        """
+
+        # Prompts should be passed as a list, so handle
+        # the case where we just passed a single dict
+        if isinstance(prompt, dict):
+            prompt = [prompt]
+
+        try:
+            res = self.llm.chat.completions.create(
+                messages=prompt, model=self.model_name, max_tokens=n_tok,
+                **addn_oai_kwargs,
+                **self.oai_kwargs
+            )
+        except openai.AuthenticationError:
+            logger.info("Auth failed, attempting to re-authenticate before retrying")
+            # HACK: This isn't terrific, but it should work for
+            # our current use case (Azure OpenAI with service principal/User creds)
+            if isinstance(self.llm, openai.AzureOpenAI):
+                self.authenticate()
+                self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
+            raise e
         except Exception as e:
             # TODO: some error handling here
             logger.debug(e)
@@ -117,12 +164,14 @@ class Agent(metaclass=abc.ABCMeta):
     def format_prompt(self, **kwargs) -> str:
         """
         Method which formats the BASE_QUERY string, possibly inserting additional content.
+        This is usually called within get_next_message() to populate the first user message.
         """
         raise NotImplementedError()
 
     def get_next_messages(self) -> list[dict[str, str]]:
         """
-        Retrieve next message payload for GPT prompting
+        Retrieve next message payload for GPT prompting.
+        This defaults to only the SYSTEM_PROMPT and the formatted BASE_PROMPT via format_prompt()
         """
         out = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
@@ -137,6 +186,9 @@ class Agent(metaclass=abc.ABCMeta):
         return self.truncated
 
     def reset(self) -> None:
+        """
+        Reset agent state for a re-run
+        """
         self.scratchpad = ""
         self.answer = ""
         self.curr_step = 1
@@ -224,9 +276,9 @@ class ReduceAgent(Agent):
     """
     question : list[str]
 
-    def __init__(self, question: list[str], model_name: str, llm: openai.OpenAI | None = None):
+    def __init__(self, question: list[str], model_name: str, llm: openai.OpenAI | None = None, **oai_kwargs):
         self.question = []
-        super().__init__(question, model_name, llm)
+        super().__init__(question, model_name, llm, **oai_kwargs)
     def step(self):
         """
         This will always be a single-step run to summarize the messages
@@ -262,7 +314,7 @@ class ChunkedAgent(Agent):
     full_question : str
     chunk_max : int
 
-    def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None, chunk_max : int = 3000):
+    def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None, chunk_max : int = 3000, **oai_kwargs):
         # Also save full input to full_question attribute since we'll
         # overwrite self.question if the resulting payload is too large
         self.full_question = question
@@ -276,7 +328,7 @@ class ChunkedAgent(Agent):
         # Take the base prompt length before we fstring it
         self.prompt_len = len(self.tokenizer.encode(self.BASE_PROMPT.format(question="") + self.SYSTEM_PROMPT))
         
-        super().__init__(question, model_name, llm)
+        super().__init__(question, model_name, llm, **oai_kwargs)
 
     def combine_answer_cache(self) -> None:
         """
@@ -382,12 +434,11 @@ class ToolAwareAgent(Agent):
     during step() if the GPT calls it.
     """
 
-    TOOLS : list[dict] = []
+    TOOLS : list[dict]
     # Will always be added to TOOLS
     # (required to finalize)
-    submit_tool : list[dict] = [
+    submit_tool : dict = {
         # Submit (final response)
-        {
             "type": "function",
             "function": {
                 "name": "call_submit",
@@ -404,22 +455,36 @@ class ToolAwareAgent(Agent):
                 }
             }
         }
-    ]
 
     # Payload to send back in subsequent steps
-    tool_res_payload : list[dict] = []
+    tool_res_payload : list[dict]
 
-    def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None):
-        self.TOOLS.extend(self.submit_tool)
-        super().__init__(question, model_name, llm)
-    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto", **oai_kwargs):
+    def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None, tools: Optional[Union[dict, list[dict]]] = None, submit_tool: bool = True, **oai_kwargs):
+        self.TOOLS = []
+        self.tool_res_payload = []
+        if tools is not None:
+            if isinstance(tools, list):
+                self.TOOLS.extend(tools)
+            else:
+                self.TOOLS.append(tools)
+        if submit_tool:
+            self.TOOLS.extend(self.submit_tool)
+
+        super().__init__(question, model_name, llm, **oai_kwargs)
+
+    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto"):
         
-        out = super().prompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use, **oai_kwargs)
+        out = super().prompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use)
 
-        # attempt to parse tool call arguments
-        if out.finish_reason == "tool_calls":
-            for i, tool in enumerate(out.message.tool_calls):
-                out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
+        if out is not None:
+            # Append GPT response to next payload
+            # NOTE: This has to come before the next step of parsing
+            self.tool_res_payload.append(deepcopy(out.message))
+
+            # attempt to parse tool call arguments
+            if out.finish_reason == "tool_calls":
+                for i, tool in enumerate(out.message.tool_calls):
+                    out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
 
         return out
 
@@ -434,9 +499,13 @@ class ToolAwareAgent(Agent):
         
         return out
     
-    def _handle_tool_calls(self, response):
+    def _handle_tool_calls(self, response: Choice):
         """
         Handle all tool calls in response object
+        
+        This gets a method within this class by name and evaluates it with the arguments provided by openai.
+
+        The output of that method is appended to a new message in the tool_res_payload list, for downstream querying.
         """
         for tool in response.message.tool_calls:
             # Try to call tool, if present, else raise.
@@ -452,8 +521,7 @@ class ToolAwareAgent(Agent):
                 self.tool_res_payload.append(
                     {
                         "tool_call_id": tool.id,
-                        "role": "function",
-                        "name": tool.function.name,
+                        "role": "tool",
                         "content": tool_result
                     }
                 )
@@ -468,7 +536,7 @@ class ToolAwareAgent(Agent):
 
         # Send off messages for reply
         self.scratchpad += f"=== Input {self.curr_step} ==========\n"
-        self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input)
+        self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input if not isinstance(msg, ChatCompletionMessage))
         self.scratchpad += "\n===================================\n"
     
         # Attempt to query GPT and handle invalid JSON parsing of args
@@ -490,22 +558,18 @@ class ToolAwareAgent(Agent):
                     )
                     n_retry -= 1
                     continue
-        # Append GPT response to next payload
-        self.tool_res_payload.append(
-            {
-            "role": "assistant",
-            "content": response.message.content if response.message.content is not None else ""
-            }
-        )
-
-        if response.finish_reason == "length":
-            # Determine if we're truncated
+        if response is None:
+            logger.warning("No response after 3 retries, Terminating!")
             self.truncated = True
-            logger.warn("Response truncated due to length, Terminating!")
-        # Recursive call if tool calls in response
-        elif response.finish_reason == "tool_calls":
-            self._handle_tool_calls(response)
-        
+        else:
+            if response.finish_reason == "length":
+                # Determine if we're truncated
+                self.truncated = True
+                logger.warn("Response truncated due to length, Terminating!")
+            # Recursive call if tool calls in response
+            elif response.finish_reason == "tool_calls":
+                self._handle_tool_calls(response)
+            
         # End Step
         self.curr_step += 1
     
