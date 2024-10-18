@@ -136,3 +136,60 @@ class PredictionAgent(ToolAwareAgent):
                     break
         else:
             super().run(reset)
+
+class PredictionAgentWithJustification(PredictionAgent):
+    def _build_pydantic_model(self):
+        """
+        Construct a pydantic model that we'll use to force the LLM to return a structured response.
+        This will also include a justification for the classification.
+        """
+
+        self.response_model = pydantic.create_model(
+            "classify",
+            labels=(
+                List[Literal[tuple(self.labels)]],
+                pydantic.Field(
+                    alias="labels",
+                    description="Classify the input data into one of the possible categories",
+                )
+            ),
+            justification=(
+                List[str],
+                pydantic.Field(
+                    alias="justification",
+                    description="SHORT description explaining your reasoning for the classfication"
+                )
+            )
+        )
+
+        self.response_tool = openai.pydantic_function_tool(
+            self.response_model,
+            name="classify",
+            description="Classify the data using one of the possible categories and, for each classification, provide a short description of your reasoning.",
+        )
+
+    def classify(self, labels: list[str], justification: list[str]) -> Optional[str]:
+        """
+        Function to "classify" ADE, which inspects that the LLM provided a response of the correct length and used only the labels provided
+        """
+        if len(labels) != self.expected_n:
+            logger.warning(f"Invalid return length: {len(labels)}, retrying.")
+            return f"Input was of length {self.expected_n} but you returned a response of length {len(labels)}. Please try again."
+
+        if len(justification) != len(labels):
+            logger.warning(f"Invalid justification length: {len(justification)} != {len(labels)}, retrying.")
+            return f"You should have provided one justification for each classification you provided ({len(labels)}), but I only recieved {len(justification)}. Please try again."
+        try:
+            # End our run if we make it through this
+            parsed_args = self.response_model(labels=labels, justification=justification)
+            self.answer = [(ans, just) for ans, just in zip(parsed_args.labels, parsed_args.justification)]
+            self.terminated = True
+            self.scratchpad += "===== Answer ==========\n"
+            self.scratchpad += str(self.answer)
+            logger.info("Got valid response, terminating.")
+        except pydantic.ValidationError:
+            logger.warning(f"Response didn't pass pydantic validation, retrying.")
+            # HACK: the default message from pydantic would be pretty long and lead to context length issues
+            # so I'm making my own
+            invalid_labels = [val for val in labels if val not in self.labels]
+            return f"Pydantic validation of function call failed because you passed the following invalid label(s): {invalid_labels}. Please retry using ONLY the labels allowed."
