@@ -11,7 +11,7 @@ Right now, everything is quite experimental and I'm still figuring out the API.
 Should be pip installable from this repo.
 
 ```sh
-pip install git+https://github.com/cdcai/multiagent.git
+pip install git+https://github.com/cdcai/agents.git
 ```
 
 ## Examples
