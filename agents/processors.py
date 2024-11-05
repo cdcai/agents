@@ -17,7 +17,7 @@ class DFBatchProcessor:
 
     The main user-facing method after init is .process()
     """
-    def __init__(self, df: pl.DataFrame, agent_class: Agent, batch_size: int = 5, n_workers : int = 1, **kwargs):
+    def __init__(self, df: pl.DataFrame, agent_class: Agent, batch_size: int = 5, n_workers : int = 1, n_retry : int = 5, interactive : bool = False, **kwargs):
         """
         A Processor which operates on chunks of a polars dataframe.
         Each chunk must be independent, as state will not be maintained between agent calls.
@@ -26,6 +26,8 @@ class DFBatchProcessor:
         :param Agent agent_class: An uninitialized class which will be used to process the chunks of `df` (which it takes as it's first argument)
         :param int batch_size: Number of rows per batch of `df`
         :param int n_workers: Number of workers to use during processing. >1 will spawn parallel workers using concurrent.futures
+        :param int n_retry: For each agent, how many round trips to try before giving up
+        :param bool interactive: Use interactive authentication (`True`) instead of ClientSecret authentication (not advised for `n_workers` > 1)
         :param kwargs: Additional named arguments passed to `agent_class` on init
         """
         self.agent_class = agent_class
@@ -33,11 +35,14 @@ class DFBatchProcessor:
         self.n_workers = n_workers
         self.parallel = n_workers > 1
         self.batch_size = batch_size
+        self.n_retry = n_retry
         self.agent_kwargs = kwargs
+        self.interactive = interactive
         
         # Parallel queues
-        self.in_q = queue.PriorityQueue()
-        self.out_q = queue.PriorityQueue()
+        if self.parallel:
+            self.in_q = queue.PriorityQueue()
+            self.out_q = queue.PriorityQueue()
 
     def _load_inqueue(self):
         """
@@ -103,7 +108,7 @@ class DFBatchProcessor:
 
     def _spawn_agent_threadpool(self, id: int, data: pl.DataFrame) -> tuple[int, list[str]]:
         try:
-            agent = self._spawn_agent(self.prompt, data)
+            agent = self._spawn_agent(data)
             answer = agent(steps=self.n_retry)
             if len(answer) == 0:
                 logger.error(f"[_spawn_agent_threadpool]: No answer was provided for query {id}, filling with missing values!")
@@ -122,7 +127,7 @@ class DFBatchProcessor:
         n_batches = -(-self.df.height // self.batch_size)
         for i, batch in tqdm(enumerate(self.df.iter_slices(self.batch_size), 1), total=n_batches, desc="Batch Processing", unit="Batch"):
             logger.info(f"---Running batch {i}----")
-            agent = self._spawn_agent(self.prompt, batch)
+            agent = self._spawn_agent(batch)
             answer = agent(steps=self.n_retry)
             if len(answer) > 0:
                 out.extend(answer)
@@ -132,10 +137,10 @@ class DFBatchProcessor:
         
         return(out)
 
-    def _spawn_agent(self, batch: pl.DataFrame, parallel: bool = False):
+    def _spawn_agent(self, batch: pl.DataFrame):
         openai_creds_ad("Interactive" if self.interactive else "ClientSecret")
 
-        if parallel:
+        if self.parallel:
             llm = openai.AsyncAzureOpenAI()
         else:
             llm = openai.AzureOpenAI()
