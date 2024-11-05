@@ -1,5 +1,5 @@
 """
-Structured prediction agent (predicting from a list of choices)
+Structured prediction agents (predicting from a list of choices)
 Sean Browning (oet5)
 """
 
@@ -138,6 +138,11 @@ class PredictionAgent(ToolAwareAgent):
             super().run(reset)
 
 class PredictionAgentWithJustification(PredictionAgent):
+    """
+    A PredictionAgent which returns both a structured label output along with a short text justification for the prediction.
+
+    The label and justification are supplied in the same tool call / response body rather than in separate messages to improve coherence.
+    """
     def _build_pydantic_model(self):
         """
         Construct a pydantic model that we'll use to force the LLM to return a structured response.
