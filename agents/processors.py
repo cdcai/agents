@@ -140,10 +140,7 @@ class DFBatchProcessor:
     def _spawn_agent(self, batch: pl.DataFrame):
         openai_creds_ad("Interactive" if self.interactive else "ClientSecret")
 
-        if self.parallel:
-            llm = openai.AsyncAzureOpenAI()
-        else:
-            llm = openai.AzureOpenAI()
+        llm = openai.AzureOpenAI()
         
         out = self.agent_class(batch, llm=llm, **self.agent_kwargs)
 
