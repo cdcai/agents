@@ -157,7 +157,7 @@ class DFBatchProcessor:
         """
         self.predicted = []
 
-        if self.n_workers:
+        if self.parallel:
             self.predicted = self._process_parallel()
         else:
             self.predicted = self._process_seq()
