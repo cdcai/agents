@@ -21,36 +21,28 @@ class PredictionAgent(ToolAwareAgent):
     """
 
     answer: list[str]
+
     def __init__(
         self,
-        prompt: str,
-        persona: str,
-        model_name: str,
         df: pl.DataFrame,
+        model_name: str,
         labels: list[str],
         llm: openai.OpenAI | None = None,
         **oai_kwargs,
     ):
         """
         A ToolAwareAgent where the output is a prediction for each row of `df` from one of the choices in `labels`
-
-        :param prompt: A prompt which becomes the first user message and should explain how to classify `df`
-        :param persona: A system message / persona
-        :param model_name: The Azure OpenAI model name to use
         :param df: The data to classify
-        :param labels: The set of labels the model will choose from
+        :param model_name: The Azure OpenAI model name to use
+        :param labels: The set of categorical labels the model can choose from
         :param llm: (optional) An OpenAI instance, otherwise one will be created via ClientSecret credentials internally
         :param oai_kwargs: Additional key word args to pass to the OpenAI Chat Completion API (temperature, top_k, etc.)
-
         """
         self.labels = labels
         self.expected_n = df.height
-        self.df = df
-        self.SYSTEM_PROMPT = persona
-        self.BASE_PROMPT = prompt
         self._build_pydantic_model()
         super().__init__(
-            question=prompt,
+            question=df.write_ndjson(),
             model_name=model_name,
             llm=llm,
             tools=self.response_tool,
@@ -78,16 +70,6 @@ class PredictionAgent(ToolAwareAgent):
             self.response_model,
             name="classify",
             description="Classify the data using one of the possible categories",
-        )
-
-    def format_prompt(self) -> str:
-        """
-        Return our prompt as-is, because we pre-formatted it
-        """
-        return (
-            self.BASE_PROMPT
-            + f"\n{self.expected_n} potential cases:\n"
-            + self.df.write_ndjson()
         )
 
     def classify(self, labels: list[str]) -> Optional[str]:
