@@ -1,11 +1,13 @@
-from abc import ABCMeta, abstractmethod
+import concurrent.futures
 import logging
 import queue
-import concurrent.futures
-from tqdm import tqdm
-import polars as pl
+from abc import ABCMeta, abstractmethod
+from itertools import islice
+from typing import Iterable, Iterator
+
 import openai
-from typing import Iterator, Iterable
+import polars as pl
+from tqdm import tqdm
 
 from .agent import Agent
 from .generic import openai_creds_ad
@@ -13,7 +15,7 @@ from .generic import openai_creds_ad
 logger = logging.getLogger(__name__)
 
 
-class BatchProcessor(metaclass=ABCMeta):
+class _BatchProcessor(metaclass=ABCMeta):
     """
     A virtual class for a processor that maps over a large iterable
     """
@@ -184,7 +186,36 @@ class BatchProcessor(metaclass=ABCMeta):
 
         return self.predicted
 
-class DFBatchProcessor(BatchProcessor):
+class BatchProcessor(_BatchProcessor):
+    """
+    A batch processor which maps elements of an iterable (usually a list[str]) using a language agent.
+    Each chunk of the iterable is operated on independently.
+    """
+    def _iter(self) -> Iterator:
+        """
+        Just a backport of itertools.batched
+        """
+        iterator = iter(self.data)
+        while batch := tuple(islice(iterator, self.batch_size)):
+            yield batch
+
+    def _placeholder(self, batch: Iterable):
+        """
+        Returns a List[str] with len() == len(batch)
+        """
+        resp_obj = "" if self.agent_class.output_len == 1 else ("", ) * self.agent_class.output_len
+        return [resp_obj] * len(batch)
+    
+    @property
+    def n_batches(self) -> int:
+        if self.parallel:
+            n = self.in_q.qsize()
+        else:
+            n = -(-len(self.data) // self.batch_size)
+
+        return n
+
+class DFBatchProcessor(_BatchProcessor):
     """
     A Processor which operates on chunks of a polars dataframe.
     Each chunk must be independent, as state will not be maintained between agent calls.
