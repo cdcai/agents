@@ -46,7 +46,7 @@ class Agent(metaclass=abc.ABCMeta):
         self.oai_kwargs.update(oai_kwargs)
         self.reset()
 
-    def run(self, reset: bool = False) -> None:
+    def run(self, reset: bool = False, *kwargs) -> None:
         if reset:
             self.reset()
 
