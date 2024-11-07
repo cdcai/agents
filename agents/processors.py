@@ -72,7 +72,7 @@ class BatchProcessor(metaclass=ABCMeta):
         raise NotImplementedError()
 
     @abstractmethod
-    def _placeholder(batch: Iterable) -> Iterable:
+    def _placeholder(self, batch: Iterable) -> Iterable:
         """
         Abstract method which should return an appropriately sized placholder data piece
         that will be inserted in place of a real prediction if we encounter an error
@@ -209,11 +209,12 @@ class DFBatchProcessor(BatchProcessor):
     def _iter(self) -> Iterator[pl.DataFrame]:
         return self.data.iter_slices(self.batch_size)
 
-    def _placeholder(batch: pl.DataFrame):
+    def _placeholder(self, batch: pl.DataFrame):
         """
         Returns a List[str] with len() == batch.height
         """
-        return [""] * batch.height
+        resp_obj = "" if self.agent_class.output_len == 1 else ("", ) * self.agent_class.output_len
+        return [resp_obj] * batch.height
     
     @property
     def n_batches(self) -> int:

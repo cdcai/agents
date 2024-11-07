@@ -125,6 +125,7 @@ class PredictionAgentWithJustification(PredictionAgent):
 
     The label and justification are supplied in the same tool call / response body rather than in separate messages to improve coherence.
     """
+    output_len: int = 2 # Each sample has two components: a label, and a justification
     def _build_pydantic_model(self):
         """
         Construct a pydantic model that we'll use to force the LLM to return a structured response.

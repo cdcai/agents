@@ -23,6 +23,7 @@ class Agent(metaclass=abc.ABCMeta):
     terminated: bool = False
     truncated: bool = False
     curr_step: int = 1
+    output_len: int = 1
     scratchpad: str = ""
     answer: str = ""
     BASE_PROMPT: str = ""
