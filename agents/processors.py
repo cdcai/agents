@@ -142,6 +142,8 @@ class _BatchProcessor(metaclass=ABCMeta):
                 logger.error(f"[_worker - {worker_name}]: Task {id} failed, {str(e)}")
                 errored = True
 
+            in_q.task_done()
+
             if errored:
                 retry_left -= 1
                 if retry_left < 0:
@@ -156,7 +158,6 @@ class _BatchProcessor(metaclass=ABCMeta):
                     continue
 
             await out_q.put((id, answer))
-            in_q.task_done()
             self.pbar.update()
 
     def _spawn_agent(self, batch: Iterable) -> Agent:
