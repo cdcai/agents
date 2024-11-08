@@ -128,7 +128,7 @@ class _BatchProcessor(metaclass=ABCMeta):
                 (id, retry_left, data) = await in_q.get()
                 errored = False
                 agent = self._spawn_agent(data)
-                answer = await agent()
+                answer = await agent(steps=self.n_retry)
 
                 if len(answer) == 0:
                     logger.error(f"[_worker - {worker_name}]: No answer was provided for query {id}")
