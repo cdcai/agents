@@ -27,7 +27,7 @@ class PredictionAgent(ToolAwareAgent):
         df: pl.DataFrame,
         model_name: str,
         labels: list[str],
-        llm: openai.OpenAI | None = None,
+        llm: openai.AsyncOpenAI | None = None,
         **oai_kwargs,
     ):
         """
@@ -103,7 +103,7 @@ class PredictionAgent(ToolAwareAgent):
         self.truncated = False
         self.terminated = False
 
-    def run(self, reset: bool = False, steps: Optional[int] = None) -> None:
+    async def run(self, reset: bool = False, steps: Optional[int] = None) -> None:
         """
         Run the agent, optionally running only a fixed number of steps
         """
@@ -113,11 +113,11 @@ class PredictionAgent(ToolAwareAgent):
         if steps is not None:
             for _ in range(steps):
                 logger.debug(f"Running step {self.curr_step}.")
-                self.step()
+                await self.step()
                 if self.is_terminated() or self.is_truncated():
                     break
         else:
-            super().run(reset)
+            await super().run(reset)
 
 class PredictionAgentWithJustification(PredictionAgent):
     """

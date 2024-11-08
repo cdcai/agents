@@ -1,6 +1,5 @@
-import concurrent.futures
+import asyncio
 import logging
-import queue
 from abc import ABCMeta, abstractmethod
 from itertools import islice
 from typing import Iterable, Iterator
@@ -18,6 +17,7 @@ logger = logging.getLogger(__name__)
 class _BatchProcessor(metaclass=ABCMeta):
     """
     A virtual class for a processor that maps over a large iterable
+    where 1 output is expected for every 1 input
     """
     def __init__(self, data: Iterable, agent_class: Agent, batch_size: int = 5, n_workers : int = 1, n_retry : int = 5, interactive : bool = False, **kwargs):
         """
@@ -35,15 +35,16 @@ class _BatchProcessor(metaclass=ABCMeta):
         self.agent_class = agent_class
         self.data = data
         self.n_workers = n_workers
-        self.parallel = n_workers > 1
         self.batch_size = batch_size
         self.n_retry = n_retry
         self.agent_kwargs = kwargs
         self.interactive = interactive
+        openai_creds_ad("Interactive" if self.interactive else "ClientSecret")
+        self.llm = openai.AsyncAzureOpenAI()
+        
         # Parallel queues
-        if self.parallel:
-            self.in_q = queue.PriorityQueue()
-            self.out_q = queue.PriorityQueue()
+        self.in_q = asyncio.PriorityQueue()
+        self.out_q = asyncio.PriorityQueue()
 
     def _load_inqueue(self):
         """
@@ -51,18 +52,18 @@ class _BatchProcessor(metaclass=ABCMeta):
         """
         logger.info("Loading Inqueue")
         for i, batch in enumerate(self._iter()):
-            self.in_q.put_nowait((i, batch))
+            self.in_q.put_nowait((i, self.n_retry, batch))
         
         self.error_tasks = 0
 
     @staticmethod
-    def dequeue(q: queue.Queue) -> list:
+    def dequeue(q: asyncio.Queue) -> list:
         out = []
         while q.qsize() > 0:
             try:
                 it = q.get_nowait()
                 out.append(it)
-            except queue.Empty:
+            except asyncio.QueueEmpty:
                 break
         return out
 
@@ -80,51 +81,37 @@ class _BatchProcessor(metaclass=ABCMeta):
         that will be inserted in place of a real prediction if we encounter an error
         """
         raise NotImplementedError()
-    
-    @property
-    @abstractmethod
-    def n_batches(self) -> int:
-        """
-        Abstract method which should return the int value for the number of batches
-        that will be processed after chunking
-        (for parallel, this is in_q.qsize() after calling _load_inqueue())
-        """
-        raise NotImplementedError()
 
-    def _process_parallel(self):
+    async def process(self):
+        """
+        Process all samples from input data using language agent, splitting by chunk size specified at init
+        
+        :return Iterable: The predicted values after mapping over the input iterable (also stored in self.predicted)
+        """
         # Either the workers we called for at init or the number of batches we have to process
         # (whichever is fewer)
         self._load_inqueue()
-        n_workers = min(self.n_workers, self.n_batches)
+        n_workers = min(self.n_workers, self.in_q.qsize())
         logger.info(f"[_process_parallel] processing {self.in_q.qsize()} queries on {n_workers} threads")
 
-        with tqdm(total=self.in_q.qsize(), desc="Batch Processing", unit="Batch") as pbar:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix="llm_worker") as executor:
-                futures : dict[concurrent.futures.Future, tuple[int, pl.DataFrame]] = {}
-                
-                # This may take >1 cycle if we have to re-run, so while()
-                while True:
-                    while self.in_q.qsize() > 0:
-                        id, data = self.in_q.get()
-                        futures.update({executor.submit(self._spawn_agent_threadpool, id, data): (id, data)})
+        self.pbar = tqdm(total=self.in_q.qsize(), desc="Batch Processing", unit="Batch")
+        workers = []
 
-                    for future in concurrent.futures.as_completed(futures):
-                        id, data = futures[future]
-                        try:
-                            id_out, answer = future.result()
-                        except Exception:
-                            # Error indicates that we're returning the data for re-processing, so load back into inq
-                            logger.warning(f"[_process_parallel]: Batch {id} failed, re-trying.")
-                            self.in_q.put((id, data))
-                            continue
-                        self.out_q.put((id_out, answer))
-                        pbar.update()
-                    if self.in_q.qsize() == 0:
-                        # No more tasks, kill
-                        break
+        for i in range(n_workers):
+            workers.append(asyncio.create_task(self._worker(f"llm_worker-{i}", self.in_q, self.out_q), name=f"llm_worker-{i}"))
+        
+        # Wait until the queue is processed
+        await self.in_q.join()
+
+        # Terminate workers
+        for worker in workers:
+            worker.cancel()
+        
+        self.pbar.close()
 
         if self.error_tasks > 0:
-            logger.warning(f"[_process_parallel] There were {self.error_tasks} unsucessful batches!")
+            logger.warning(f"[process] There were {self.error_tasks} unsucessful batches!")
+        
         # De-queue into list from output queue
         out = []
         for _, msg in self.dequeue(self.out_q):
@@ -132,59 +119,49 @@ class _BatchProcessor(metaclass=ABCMeta):
 
         return out
 
-    def _spawn_agent_threadpool(self, id: int, data: pl.DataFrame) -> tuple[int, list[str]]:
-        try:
-            agent = self._spawn_agent(data)
-            answer = agent(steps=self.n_retry)
-            if len(answer) == 0:
-                logger.error(f"[_spawn_agent_threadpool]: No answer was provided for query {id}, filling with missing values!")
-                answer = self._placeholder(data)
-                self.error_tasks += 1
+    async def _worker(self, worker_name: str, in_q: asyncio.Queue, out_q: asyncio.Queue):
+        """
+        Agent worker
+        """
+        while True:
+            try:
+                (id, retry_left, data) = await in_q.get()
+                errored = False
+                agent = self._spawn_agent(data)
+                answer = await agent()
 
-            logger.info(f"[_spawn_agent_threadpool]: Processed query {id}.")
+                if len(answer) == 0:
+                    logger.error(f"[_worker - {worker_name}]: No answer was provided for query {id}")
+                    errored = True
 
-            return id, answer
-        except Exception as e:
-            logger.error(f"[_spawn_agent_threadpool]: Task failed, {str(e)}")
-            raise e
+            except asyncio.CancelledError as e:
+                logger.info(f"[_worker - {worker_name}]: Got CancelledError, terminating.")
+                break
 
-    def _process_seq(self) -> list[str]:
-        out = []
-        for i, batch in tqdm(enumerate(self._iter(), 1), total=self.n_batches, desc="Batch Processing", unit="Batch"):
-            logger.info(f"[_process_seq] Running batch {i}")
-            agent = self._spawn_agent(batch)
-            answer = agent(steps=self.n_retry)
-            if len(answer) > 0:
-                out.extend(answer)
-            else:
-                logger.error("[_process_seq] No answer was provided, filling with missing values!")
-                out.extend(self._placeholder(batch))
-        
-        return(out)
+            except Exception as e:
+                logger.error(f"[_worker - {worker_name}]: Task {id} failed, {str(e)}")
+                errored = True
 
-    def _spawn_agent(self, batch: Iterable):
-        openai_creds_ad("Interactive" if self.interactive else "ClientSecret")
+            if errored:
+                retry_left -= 1
+                if retry_left < 0:
+                    # End retries, fill in data with placeholder
+                    logger.error(f"[_worker - {worker_name}]: Task {id} failed {self.n_retry} times and will not be retried")
+                    answer = self._placeholder(data)
+                    self.error_tasks += 1
+                else:
+                    # Send data back to queue to retry processing
+                    logger.info(f"[_worker - {worker_name}]: Task {id} - {retry_left} retries remaining")
+                    await in_q.put((id, retry_left, data))
+                    continue
 
-        llm = openai.AzureOpenAI()
-        
-        out = self.agent_class(batch, llm=llm, **self.agent_kwargs)
+            await out_q.put((id, answer))
+            in_q.task_done()
+            self.pbar.update()
 
+    def _spawn_agent(self, batch: Iterable) -> Agent:
+        out = self.agent_class(batch, llm=self.llm, **self.agent_kwargs)
         return out
-
-    def process(self) -> Iterable:
-        """
-        Process all samples from input data using language agent, splitting by chunk size specified at init
-        
-        :return Iterable: The predicted values after mapping over the input iterable (also stored in self.predicted)
-        """
-        self.predicted = []
-
-        if self.parallel:
-            self.predicted = self._process_parallel()
-        else:
-            self.predicted = self._process_seq()
-
-        return self.predicted
 
 class BatchProcessor(_BatchProcessor):
     """
@@ -205,15 +182,6 @@ class BatchProcessor(_BatchProcessor):
         """
         resp_obj = "" if self.agent_class.output_len == 1 else ("", ) * self.agent_class.output_len
         return [resp_obj] * len(batch)
-    
-    @property
-    def n_batches(self) -> int:
-        if self.parallel:
-            n = self.in_q.qsize()
-        else:
-            n = -(-len(self.data) // self.batch_size)
-
-        return n
 
 class DFBatchProcessor(_BatchProcessor):
     """
@@ -246,12 +214,3 @@ class DFBatchProcessor(_BatchProcessor):
         """
         resp_obj = "" if self.agent_class.output_len == 1 else ("", ) * self.agent_class.output_len
         return [resp_obj] * batch.height
-    
-    @property
-    def n_batches(self) -> int:
-        if self.parallel:
-            n = self.in_q.qsize()
-        else:
-            n = -(-self.data.height // self.batch_size)
-
-        return n

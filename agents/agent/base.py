@@ -1,3 +1,4 @@
+import asyncio
 import abc
 import json
 import logging
@@ -32,29 +33,29 @@ class Agent(metaclass=abc.ABCMeta):
         "temperature": 0.0
     }
     def __init__(
-        self, question: str, model_name: str, llm: Optional[openai.OpenAI] = None, **oai_kwargs
+        self, question: str, model_name: str, llm: Optional[openai.AsyncOpenAI] = None, **oai_kwargs
     ):
         self.question = question
         # We default to Azure OpenAI here, but
         # we could also use something else as long as it follows the OpenAI API
         if llm is None:
             self.authenticate()
-            self.llm = openai.AzureOpenAI()
+            self.llm = openai.AsyncAzureOpenAI()
         else:
             self.llm = llm
         self.model_name = model_name
         self.oai_kwargs.update(oai_kwargs)
         self.reset()
 
-    def run(self, reset: bool = False, *kwargs) -> None:
+    async def run(self, reset: bool = False, *kwargs) -> None:
         if reset:
             self.reset()
 
         while not (self.is_terminated() or self.is_truncated()):
             logger.debug(f"Running step {self.curr_step}.")
-            self.step()
+            await self.step()
 
-    def __call__(self, *args, **kwargs) -> str:
+    async def __call__(self, *args, **kwargs) -> str:
         """
         Run the underlying agent logic and returns the final answer.
 
@@ -69,12 +70,13 @@ class Agent(metaclass=abc.ABCMeta):
             self.dump(outfile)
 
         return self.answer
+
     @abc.abstractmethod
-    def step(self):
+    async def step(self):
         raise NotImplementedError()
 
     @backoff.on_exception(backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3)
-    async def aprompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **addn_oai_kwargs) -> Choice:
+    async def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **addn_oai_kwargs) -> Choice:
         """
         An async version of the main OAI prompting logic.
 
@@ -114,51 +116,7 @@ class Agent(metaclass=abc.ABCMeta):
 
         if out.finish_reason == "length":
             self.truncated = True
-            logger.warn("Message returned truncated.")
-        return out
- 
-    @backoff.on_exception(backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3)
-    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **addn_oai_kwargs) -> Choice:
-        """
-        The main OAI prompting logic.
-
-        :param prompt: Either a dict or a list of dicts representing the message(s) to send to OAI model
-        :param n_tok: An optional maximum token length to request of the model response
-        :param addn_oai_kwargs: Key word arguments passed to completions.create() call (tool calls, etc.)
-
-        :return: An openAI Choice response object
-        """
-
-        # Prompts should be passed as a list, so handle
-        # the case where we just passed a single dict
-        if isinstance(prompt, dict):
-            prompt = [prompt]
-
-        try:
-            res = self.llm.chat.completions.create(
-                messages=prompt, model=self.model_name, max_tokens=n_tok,
-                **addn_oai_kwargs,
-                **self.oai_kwargs
-            )
-        except openai.AuthenticationError:
-            logger.info("Auth failed, attempting to re-authenticate before retrying")
-            # HACK: This isn't terrific, but it should work for
-            # our current use case (Azure OpenAI with service principal/User creds)
-            if isinstance(self.llm, openai.AzureOpenAI):
-                self.authenticate()
-                self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
-            raise e
-        except Exception as e:
-            # TODO: some error handling here
-            logger.debug(e)
-            raise e
-
-        out = res.choices[0]
-        logger.info(f"Received response: {out.message.content}")
-
-        if out.finish_reason == "length":
-            self.truncated = True
-            logger.warn("Message returned truncated.")
+            logger.warning("Message returned truncated.")
         return out
 
     @abc.abstractmethod
@@ -180,6 +138,7 @@ class Agent(metaclass=abc.ABCMeta):
         ]
         
         return out
+
     def is_terminated(self) -> bool:
         return self.terminated
 
@@ -234,12 +193,12 @@ class PersistentAgent(Agent):
         self.conversation_cache = []
         return super().reset()
 
-    def step(self):
+    async def step(self):
         """
         Full Agent logic. Prompts LLM and saves answer
         """
         llm_prompt_input = self.get_next_messages()
-        response = self.prompt_agent(llm_prompt_input, n_tok=None)
+        response = await self.prompt_agent(llm_prompt_input, n_tok=None)
         answer = response.message.content
         self.scratchpad += f"=== Input ==========\n"
         self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input)
@@ -277,9 +236,10 @@ class ReduceAgent(Agent):
     """
     question : list[str]
 
-    def __init__(self, question: list[str], model_name: str, llm: openai.OpenAI | None = None, **oai_kwargs):
+    def __init__(self, question: list[str], model_name: str, llm: openai.AsyncOpenAI | None = None, **oai_kwargs):
         self.question = []
         super().__init__(question, model_name, llm, **oai_kwargs)
+
     def step(self):
         """
         This will always be a single-step run to summarize the messages
@@ -315,7 +275,7 @@ class ChunkedAgent(Agent):
     full_question : str
     chunk_max : int
 
-    def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None, chunk_max : int = 3000, **oai_kwargs):
+    def __init__(self, question: str, model_name: str, llm: openai.AsyncOpenAI | None = None, chunk_max : int = 3000, **oai_kwargs):
         # Also save full input to full_question attribute since we'll
         # overwrite self.question if the resulting payload is too large
         self.full_question = question
@@ -361,6 +321,7 @@ class ChunkedAgent(Agent):
             out.append(last_translation_message)
 
         return out
+
     def get_prompt_len(self) -> int:
         """
         Return base prompt length before using fstring to fill in template.
@@ -399,10 +360,10 @@ class ChunkedAgent(Agent):
 
         return re.sub("\s+", " ", self.BASE_PROMPT).format(question=join_str.join(input_chunks)).strip()
     
-    def step(self):
+    async def step(self):
         # Prompt LLM
         llm_prompt_input = self.get_next_messages()
-        answer = self.prompt_agent(llm_prompt_input, n_tok = 2 * self.chunk_max).message.content
+        answer = await self.prompt_agent(llm_prompt_input, n_tok = 2 * self.chunk_max).message.content
         self.scratchpad += f"=== Input {self.curr_step} ==========\n"
         self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input)
         self.scratchpad += "\n===================================\n"
@@ -417,7 +378,7 @@ class ChunkedAgent(Agent):
         self.terminated = len(self.question) == 0
         self.curr_step += 1
 
-    def run(self, reset: bool = False) -> None:
+    async def run(self, reset: bool = False) -> None:
         super().run(reset)
         self.combine_answer_cache()
     
@@ -460,7 +421,7 @@ class ToolAwareAgent(Agent):
     # Payload to send back in subsequent steps
     tool_res_payload : list[dict]
 
-    def __init__(self, question: str, model_name: str, llm: openai.OpenAI | None = None, tools: Optional[Union[dict, list[dict]]] = None, submit_tool: bool = True, **oai_kwargs):
+    def __init__(self, question: str, model_name: str, llm: openai.AsyncOpenAI | None = None, tools: Optional[Union[dict, list[dict]]] = None, submit_tool: bool = True, **oai_kwargs):
         self.TOOLS = []
         self.tool_res_payload = []
         if tools is not None:
@@ -473,9 +434,9 @@ class ToolAwareAgent(Agent):
 
         super().__init__(question, model_name, llm, **oai_kwargs)
 
-    def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto"):
+    async def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto"):
         
-        out = super().prompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use)
+        out = await super().prompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use)
 
         if out is not None:
             # Append GPT response to next payload
@@ -530,7 +491,7 @@ class ToolAwareAgent(Agent):
                 logger.error(f"Tool call {tool} failed.")
                 raise e
 
-    def step(self):
+    async def step(self):
         # Pull base query + system messages
         # (abstract)
         llm_prompt_input = self.get_next_messages()
@@ -545,12 +506,12 @@ class ToolAwareAgent(Agent):
         n_retry = 3
         while response is None and n_retry > 0:
             try:
-                response = self.prompt_agent(llm_prompt_input)
+                response = await self.prompt_agent(llm_prompt_input)
             except json.decoder.JSONDecodeError as e:
                 if n_retry == 0:
                     raise e
                 else:
-                    logger.warn(f"Tool calls in response couldn't be decoded. {n_retry} retries remaining.")
+                    logger.warning(f"Tool calls in response couldn't be decoded. {n_retry} retries remaining.")
                     llm_prompt_input.append(
                         {
                             "role": "user",
@@ -566,7 +527,7 @@ class ToolAwareAgent(Agent):
             if response.finish_reason == "length":
                 # Determine if we're truncated
                 self.truncated = True
-                logger.warn("Response truncated due to length, Terminating!")
+                logger.warning("Response truncated due to length, Terminating!")
             # Recursive call if tool calls in response
             elif response.finish_reason == "tool_calls":
                 self._handle_tool_calls(response)
@@ -629,7 +590,7 @@ class EnvAgent(Agent):
     """
     correct: bool = False
 
-    def __init__(self, question: str, model_name: str, llm: openai.OpenAI, env: gym.Env):
+    def __init__(self, question: str, model_name: str, llm: openai.AsyncOpenAI, env: gym.Env):
         self.env = env
         super().__init__(question, model_name, llm)
     
@@ -639,8 +600,8 @@ class EnvAgent(Agent):
         # importing tiktoken and computing it each step
         return super().truncated() and not self.correct
 
-    def prompt_agent(self, prompt: dict[str, str] | list[dict[str, str]], n_tok: int = 100, **oai_kwargs) -> str:
-        out_msg = super().prompt_agent(prompt, n_tok, **oai_kwargs)
+    async def prompt_agent(self, prompt: dict[str, str] | list[dict[str, str]], n_tok: int = 100, **oai_kwargs) -> str:
+        out_msg = await super().prompt_agent(prompt, n_tok, **oai_kwargs)
 
         out = self.clean_response(out_msg.message.content) + "\n"
 
