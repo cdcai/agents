@@ -64,7 +64,7 @@ class Agent(metaclass=abc.ABCMeta):
         """
         outfile = kwargs.pop("outfile", None)
 
-        self.run(*args, **kwargs)
+        await self.run(*args, **kwargs)
 
         if outfile is not None:
             self.dump(outfile)
