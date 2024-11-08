@@ -107,6 +107,8 @@ class _BatchProcessor(metaclass=ABCMeta):
         for worker in workers:
             worker.cancel()
         
+        await asyncio.gather(*workers, return_exceptions=True)
+
         self.pbar.close()
 
         if self.error_tasks > 0:
