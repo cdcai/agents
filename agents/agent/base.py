@@ -29,7 +29,7 @@ class Agent:
     :param int output_len: Expected length of answer `("", ) * output_len`
     :param str scratchpad: Documents all steps querying and evaluating LLM responses
     :param any answer: Final response from agent (default: str, could be any)
-    :param str BASE_PROMPT: Query prompt which should be populated with `{question}` via fstr (and possibly other parameters via :func:`format_prompt`). sent as system message
+    :param str BASE_PROMPT: Query prompt which should be populated with `fmt_kwargs` via fstr (and possibly other parameters via :func:`format_prompt`). sent as system message
     :param str SYSTEM_PROMPT: System prompt (persona) sent as first message in chat session
     :param dict oai_kwargs: OpenAI arguments passed as-is to API (temperature, top_p, etc.)
     :param list TOOLS: List of tools the agent can use. Can be defined in subclass or at runtime. (see: https://platform.openai.com/docs/guides/function-calling)
@@ -56,26 +56,28 @@ class Agent:
     oai_kwargs : dict
     TOOLS : list
     CALLBACKS : list
+    callback_output: list
 
     def __init__(
         self,
-        question: str,
         model_name: str,
         llm: Optional[openai.AsyncOpenAI] = None,
         tools: Optional[List[dict]] = None,
         callbacks: Optional[List[Callable]] = None,
-        **oai_kwargs
+        oai_kwargs: Optional[dict[str, any]] = None,
+        **fmt_kwargs
     ):
         """
         Base Agent class
 
-        :param str question: Final piece of prompt that is inserted into `BASE_PROMPT` via fstr
         :param str model_name: Name of OpenAI model to use (or deployment name for AzureOpenAI)
         :param AsyncOpenAI llm: Instantiated OpenAI instance to use (optional)
         :param List[dict] tools: List of tools the agent can call via response (optional)
         :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
+        :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
+        :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
         """
-        self.question = question
+        self.fmt_kwargs = fmt_kwargs
         # We default to Azure OpenAI here, but
         # we could also use something else as long as it follows the OpenAI API
         if llm is None:
@@ -93,6 +95,7 @@ class Agent:
 
         # Handle Callbacks
         self.CALLBACKS = getattr(self, "CALLBACKS", [])
+
         if callbacks is not None:
             self.CALLBACKS.extend(callbacks)
 
@@ -253,7 +256,7 @@ class Agent:
         Method which formats the BASE_PROMPT string, possibly inserting additional content.
         This is usually called within get_next_message() to populate the first user message.
         """
-        return re.sub("\s+", " ", self.BASE_PROMPT).format(question=self.question)
+        return re.sub("\s+", " ", self.BASE_PROMPT).format(**self.fmt_kwargs)
 
     def get_next_messages(self) -> list[dict[str, str]]:
         """
@@ -314,6 +317,7 @@ class Agent:
         self.scratchpad = ""
         self.answer = ""
         self.tool_res_payload = []
+        self.callback_output = []
         self.curr_step = 1
         self.truncated = False
         self.terminated = False
@@ -348,207 +352,6 @@ class Agent:
 
         os.environ["AZURE_OPENAI_ENDPOINT"] = os.environ["GPT4_URL"]
 
-class PersistentAgent(Agent):
-    APPEND_PROMPT : str = "{obs}"
-    conversation_cache : list[dict]
-
-    def reset(self) -> None:
-        self.conversation_cache = []
-        return super().reset()
-
-    async def step(self):
-        """
-        Full Agent logic. Prompts LLM and saves answer
-        """
-        llm_prompt_input = self.get_next_messages()
-        response = await self.prompt_agent(llm_prompt_input, n_tok=None)
-        answer = response.message.content
-        self.scratchpad += f"=== Input ==========\n"
-        self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input)
-        self.scratchpad += "\n===================================\n"
-        self.scratchpad += f"\n=== Answer =====\n"
-        self.scratchpad += "\n".join(answer) + "\n"
-        self.scratchpad += "\n===================================\n"
-
-        self.answer = answer
-        self.conversation_cache.append({k: response.message.__dict__[k] for k in ["role", "content"]})
-        self.terminated = True
-
-    def format_append_prompt(self, obs: str) -> str:
-        return self.APPEND_PROMPT.format(obs=obs)
-
-    def add_observation(self, obs: str) -> None:
-        """
-        Append new message / observation to message cache
-        This inserts `obs` the `APPEND_PROMPT` attribute and appends to the conversation
-        """
-        self.conversation_cache.append({
-            "role": "user",
-            "content": self.format_append_prompt(obs)
-        })
-
-    def get_next_messages(self) -> list[dict[str, str]]:
-        out = super().get_next_messages()
-        out.extend(self.conversation_cache)
-
-        return(out)
-
-class ReduceAgent(Agent):
-    """
-    An agent which reduces a list[str] question to a single string output
-    """
-    question : list[str]
-
-    def __init__(self, question: list[str], model_name: str, llm: openai.AsyncOpenAI | None = None, **oai_kwargs):
-        self.question = []
-        super().__init__(question, model_name, llm, **oai_kwargs)
-
-    def step(self):
-        """
-        This will always be a single-step run to summarize the messages
-        """
-        res = self.prompt_agent(self.get_next_messages(), n_tok=None)
-        self.answer = res.message.content
-        self.terminated = True
-
-    def get_next_messages(self) -> list[dict[str, str]]:
-        out = super().get_next_messages()
-        out.append({
-            "role": "assistant",
-            "content": "\n".join(self.question)
-        })
-        
-        return out
-    def format_prompt(self, **kwargs) -> str:
-        """Return BASE_PROMPT as-is, no templating"""
-        return self.BASE_PROMPT
-
-class ChunkedAgent(Agent):
-    """
-    A language agent which can handle large prompt input by chunking.
-    It will use tiktoken to estimate token usage and ensure that the message payload
-    sent each trip is below `chunk_max`, set at init time.
-
-    Each subsequent step() will append the output from the previous run as context.
-
-    After the run is finished, all answers will be appended together into a single string and assigned to the answer attribute.
-    """
-    answer_cache : list[str] = []
-    prompt_len : int
-    full_question : str
-    chunk_max : int
-
-    def __init__(self, question: str, model_name: str, llm: openai.AsyncOpenAI | None = None, chunk_max : int = 3000, **oai_kwargs):
-        # Also save full input to full_question attribute since we'll
-        # overwrite self.question if the resulting payload is too large
-        self.full_question = question
-        self.chunk_max = chunk_max
-        # Get tokenizer to handle chunking responses if needed
-        try:
-            self.tokenizer = tiktoken.encoding_for_model(model_name)
-        except:
-            self.tokenizer = tiktoken.get_encoding("cl100k_base")
-
-        # Take the base prompt length before we fstring it
-        self.prompt_len = len(self.tokenizer.encode(self.BASE_PROMPT.format(question="") + self.SYSTEM_PROMPT))
-        
-        super().__init__(question, model_name, llm, **oai_kwargs)
-
-    def combine_answer_cache(self) -> None:
-        """
-        Combine possibly >1 response into a the final answer string
-        """
-        self.answer = "\n".join(self.answer_cache)
-
-    def fetch_last_response(self) -> Optional[dict[str, str]]:
-        """
-        If step > 1, returns last response to use as context for the next.
-        Otherwise, we'd only include the system query and base query (including possibly only a single chunk of the input)
-        """
-        if len(self.answer_cache):
-            out = {
-                "role": "user",
-                "content": "Here is the output of previous chunk you worked on, for context:\n {}".format(self.answer_cache[-1])
-            }
-        else:
-            out = None
-        
-        return out
-
-    def get_next_messages(self) -> list[dict[str, str]]:
-        """
-        Retrieve next message payload for GPT prompting, and append previous output for context, if needed.
-        """
-        out = super().get_next_messages()
-        if (last_translation_message := self.fetch_last_response()) is not None:
-            out.append(last_translation_message)
-
-        return out
-
-    def get_prompt_len(self) -> int:
-        """
-        Return base prompt length before using fstring to fill in template.
-        (also accounting for possible previous translation context)
-        """
-        if (last_translation_message := self.fetch_last_response()) is not None:
-            prompt_len = self.prompt_len + len(self.tokenizer.encode(last_translation_message["content"]))
-        else:
-            prompt_len = self.prompt_len
-
-        return prompt_len
-
-    def format_prompt(self, split_expr: str = "\n{2,}?", join_str: str = "\n\n", **kwargs) -> str:
-        """
-        Formatting BASE_QUERY, checking for output length and chunking self.question if necessary
-
-        :param split_expr (str): A string or regex to pass to re.split() to split self.question into chunks.
-        :param join_str (str): A string to use to recompose chunks of self.question back together.
-        
-        NOTE: split_expr and join_str can be different (ex. '\\n{2, }?', and '\\n\\n'),
-        but join_str should always produce output that could be split on subsequent calls using split_expr.
-        """
-        prompt_len = self.get_prompt_len()
-
-        input_chunks = re.split(split_expr, self.question)
-        excess = []
-
-       # pop chunk by chunk until we have a message payload less than the requested max
-        while len(self.tokenizer.encode(join_str.join(input_chunks))) + prompt_len > self.chunk_max:
-            # Store excess message payload in question object
-            excess.append(input_chunks.pop())
-        
-        # Reverse things around and re-join to string
-        # to get things the right way around
-        self.question = join_str.join(reversed(excess))
-
-        return re.sub("\s+", " ", self.BASE_PROMPT).format(question=join_str.join(input_chunks)).strip()
-    
-    async def step(self):
-        # Prompt LLM
-        llm_prompt_input = self.get_next_messages()
-        answer = await self.prompt_agent(llm_prompt_input, n_tok = 2 * self.chunk_max).message.content
-        self.scratchpad += f"=== Input {self.curr_step} ==========\n"
-        self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input)
-        self.scratchpad += "\n===================================\n"
-        self.scratchpad += f"\n=== Answer {self.curr_step} =====\n"
-        self.scratchpad += answer + "\n"
-        self.scratchpad += "\n===================================\n"
-
-        # Append answer to cache and continue
-        self.answer_cache.append(answer)
-
-        # End run
-        self.terminated = len(self.question) == 0
-        self.curr_step += 1
-
-    async def run(self, reset: bool = False) -> None:
-        super().run(reset)
-        self.combine_answer_cache()
-    
-    def reset(self) -> None:
-        self.answer_cache = []
-        return super().reset()
-
 class MultiStepToolAgent(Agent):
     """
     An agent which expects multiple round-trips to complete task before finally calling a :func:`call_submit()` function to finish
@@ -579,14 +382,14 @@ class MultiStepToolAgent(Agent):
     # Payload to send back in subsequent steps
     tool_res_payload : list[dict]
 
-    def __init__(self, question: str, model_name: str, llm: openai.AsyncOpenAI | None = None, tools: Optional[Union[dict, list[dict]]] = None, submit_tool: bool = True, **oai_kwargs):
+    def __init__(self, model_name: str, llm: openai.AsyncOpenAI | None = None, tools: Optional[Union[dict, list[dict]]] = None, submit_tool: bool = True, oai_kwargs: Optional[dict[str, any]] = None, **fmt_kwargs):
         
         if tools is None and submit_tool:
             tools = [self.submit_tool]
         elif submit_tool:
             tools.append(submit_tool)
 
-        super().__init__(question, model_name, llm, tools=tools, **oai_kwargs)
+        super().__init__(model_name, llm, tools=tools, oai_kwargs=oai_kwargs, **fmt_kwargs)
 
     def call_submit(self, input: str, clean: bool = False) -> None:
         """
@@ -628,32 +431,3 @@ class MultiStepToolAgent(Agent):
             else:
                 # Shouldn't be reachable
                 raise NotImplementedError()
-
-class EnvAgent(Agent):
-    """
-    A Base (abstract) class for language agents which interact with an environment
-    (as implemented by gymnasium) 
-    """
-    correct: bool = False
-
-    def __init__(self, question: str, model_name: str, llm: openai.AsyncOpenAI, env: gym.Env):
-        self.env = env
-        super().__init__(question, model_name, llm)
-    
-    def is_truncated(self) -> bool:
-        # NOTE: I think they also checked that prompt length
-        # was under a certain value here, but that'd mean
-        # importing tiktoken and computing it each step
-        return super().truncated() and not self.correct
-
-    async def prompt_agent(self, prompt: dict[str, str] | list[dict[str, str]], n_tok: int = 100, **oai_kwargs) -> str:
-        out_msg = await super().prompt_agent(prompt, n_tok, **oai_kwargs)
-
-        out = self.clean_response(out_msg.message.content) + "\n"
-
-        return out
-
-    def reset(self):
-        super().reset()
-        self.env.reset()
-        self.correct = False

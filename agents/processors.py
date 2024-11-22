@@ -169,12 +169,15 @@ class _BatchProcessor(metaclass=ABCMeta):
 
 class BatchProcessor(_BatchProcessor):
     """
-    A batch processor which maps elements of an iterable (usually a list[str]) using a language agent.
+    A batch processor which maps an Agent over elements of an iterable (usually a list[str]).
+
     Each chunk of the iterable is operated on independently.
     """
     def _iter(self) -> Iterator:
         """
         Just a backport of itertools.batched
+
+        Yields a batch of `self.data` of len `self.batch_size` until data is exhausted.
         """
         iterator = iter(self.data)
         while batch := tuple(islice(iterator, self.batch_size)):
@@ -182,7 +185,7 @@ class BatchProcessor(_BatchProcessor):
 
     def _placeholder(self, batch: Iterable):
         """
-        Returns a List[str] with len() == len(batch)
+        Returns a `List[str]` with `len() == len(batch)`
         """
         resp_obj = "" if self.agent_class.output_len == 1 else ("", ) * self.agent_class.output_len
         return [resp_obj] * len(batch)
@@ -192,7 +195,7 @@ class DFBatchProcessor(_BatchProcessor):
     A Processor which operates on chunks of a polars dataframe.
     Each chunk must be independent, as state will not be maintained between agent calls.
 
-    The main user-facing method after init is .process()
+    The main user-facing method after init is :func:`process()`
     """
     def __init__(self, data: pl.DataFrame, agent_class: Agent, batch_size: int = 5, n_workers : int = 1, n_retry : int = 5, interactive : bool = False, **kwargs):
         """
