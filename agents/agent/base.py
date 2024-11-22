@@ -1,5 +1,4 @@
 import asyncio
-import abc
 import json
 import logging
 import os
@@ -7,7 +6,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from typing import Callable, Literal, Optional, Union
+from typing import Callable, Literal, Optional, Union, List
 from copy import deepcopy
 
 import backoff
@@ -20,7 +19,32 @@ from openai.types.chat.chat_completion import Choice, ChatCompletionMessage
 logger = logging.getLogger(__name__)
 
 
-class Agent(metaclass=abc.ABCMeta):
+class Agent:
+    """
+    Base Class for language agents, which can be initialized directly or subclassed depending on use case.
+
+    :param bool terminated: Whether agent has completed it's run (use :func:`reset`, to reset)
+    :param bool truncated: Whether the agent received a truncated response
+    :param int curr_step: Current step of the query process
+    :param int output_len: Expected length of answer `("", ) * output_len`
+    :param str scratchpad: Documents all steps querying and evaluating LLM responses
+    :param any answer: Final response from agent (default: str, could be any)
+    :param str BASE_PROMPT: Query prompt which should be populated with `{question}` via fstr (and possibly other parameters via :func:`format_prompt`). sent as system message
+    :param str SYSTEM_PROMPT: System prompt (persona) sent as first message in chat session
+    :param dict oai_kwargs: OpenAI arguments passed as-is to API (temperature, top_p, etc.)
+    :param list TOOLS: List of tools the agent can use. Can be defined in subclass or at runtime. (see: https://platform.openai.com/docs/guides/function-calling)
+    :param list CALLBACKS: List of callbacks to evaluate at completion. Should be a list of callables with a signature `fun(self, answer, scratchpad)`
+
+    Tool Use
+    --------
+    Each added tool must have a corresponding class method that can be invoked during :func:`step()` if the GPT calls it.
+    You should subclass accordingly.
+
+    Callback Use
+    ------------
+    Each callback will have access to class object, scratchpad, and final answer, thus the signature must match.
+    This is still quite experimental, but the intended usecase is for reflection / refinement applications.
+    """
     terminated: bool = False
     truncated: bool = False
     curr_step: int = 1
@@ -29,12 +53,28 @@ class Agent(metaclass=abc.ABCMeta):
     answer: str = ""
     BASE_PROMPT: str = ""
     SYSTEM_PROMPT: str = ""
-    oai_kwargs : dict = {
-        "temperature": 0.0
-    }
+    oai_kwargs : dict
+    TOOLS : list
+    CALLBACKS : list
+
     def __init__(
-        self, question: str, model_name: str, llm: Optional[openai.AsyncOpenAI] = None, **oai_kwargs
+        self,
+        question: str,
+        model_name: str,
+        llm: Optional[openai.AsyncOpenAI] = None,
+        tools: Optional[List[dict]] = None,
+        callbacks: Optional[List[Callable]] = None,
+        **oai_kwargs
     ):
+        """
+        Base Agent class
+
+        :param str question: Final piece of prompt that is inserted into `BASE_PROMPT` via fstr
+        :param str model_name: Name of OpenAI model to use (or deployment name for AzureOpenAI)
+        :param AsyncOpenAI llm: Instantiated OpenAI instance to use (optional)
+        :param List[dict] tools: List of tools the agent can call via response (optional)
+        :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
+        """
         self.question = question
         # We default to Azure OpenAI here, but
         # we could also use something else as long as it follows the OpenAI API
@@ -44,6 +84,19 @@ class Agent(metaclass=abc.ABCMeta):
         else:
             self.llm = llm
         self.model_name = model_name
+        
+        # Handle Tools
+        self.TOOLS = getattr(self, "TOOLS", [])
+
+        if tools is not None:
+            self.TOOLS.extend(tools)
+
+        # Handle Callbacks
+        self.CALLBACKS = getattr(self, "CALLBACKS", [])
+        if callbacks is not None:
+            self.CALLBACKS.extend(callbacks)
+
+        self.oai_kwargs = {"temperature": 0.0}
         self.oai_kwargs.update(oai_kwargs)
         self.reset()
 
@@ -54,6 +107,10 @@ class Agent(metaclass=abc.ABCMeta):
         while not (self.is_terminated() or self.is_truncated()):
             logger.debug(f"Running step {self.curr_step}.")
             await self.step()
+        
+        # Evaluate callbacks, if available
+        for callback in self.CALLBACKS:
+            callback(self, answer=self.answer, scratchpad=self.scratchpad)
 
     async def __call__(self, *args, **kwargs) -> str:
         """
@@ -71,9 +128,54 @@ class Agent(metaclass=abc.ABCMeta):
 
         return self.answer
 
-    @abc.abstractmethod
     async def step(self):
-        raise NotImplementedError()
+        """
+        Run a single "step" of the agent logic.
+        Handles prompting OpenAI, optionally handling tool calls, and determining whether we've
+        finished or run out of tokens.
+        """
+        # Pull base query + system messages
+        # (abstract)
+        llm_prompt_input = self.get_next_messages()
+
+        # Send off messages for reply
+        self.scratchpad += f"=== Step {self.curr_step} ===========\n"
+ 
+        # Attempt to query GPT and handle invalid JSON parsing of args
+        response = None
+        n_retry = 3
+        while response is None and n_retry > 0:
+            try:
+                response = await self.prompt_agent(llm_prompt_input)
+            except json.decoder.JSONDecodeError as e:
+                if n_retry == 0:
+                    raise e
+                else:
+                    self.scratchpad += "JSONDecodeError in tool call argumement parsing. Retrying.\n"
+                    logger.warning(f"Tool calls in response couldn't be decoded. {n_retry} retries remaining.")
+                    llm_prompt_input.append(
+                        {
+                            "role": "user",
+                            "content": "The arguments to your previous tool call couldn't be parsed correctly. Please ensure you properly escapse quotes and construct a valid JSON payload."
+                        }
+                    )
+                    n_retry -= 1
+                    continue
+        if response is None:
+            logger.warning("No response after 3 retries, Terminating!")
+            self.truncated = True
+        else:
+            if response.finish_reason == "length":
+                # Determine if we're truncated
+                self.truncated = True
+                logger.warning("Response truncated due to length, Terminating!")
+            # Recursive call if tool calls in response
+            elif response.finish_reason == "tool_calls":
+                self._handle_tool_calls(response)
+            
+        # End Step
+        self.scratchpad += "==============================\n\n"
+        self.curr_step += 1
 
     @backoff.on_exception(backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3)
     async def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **addn_oai_kwargs) -> Choice:
@@ -92,6 +194,10 @@ class Agent(metaclass=abc.ABCMeta):
         if isinstance(prompt, dict):
             prompt = [prompt]
 
+        self.scratchpad += f"--- Input ---------------------------\n"
+        self.scratchpad += "\n".join(msg["content"] for msg in prompt if not isinstance(msg, ChatCompletionMessage))
+        self.scratchpad += "\n-----------------------------------\n"
+    
         try:
             res = await self.llm.chat.completions.create(
                 messages=prompt, model=self.model_name, max_tokens=n_tok,
@@ -112,20 +218,42 @@ class Agent(metaclass=abc.ABCMeta):
             raise e
 
         out = res.choices[0]
+
+        self.scratchpad += "--- Output --------------------------\n"
+        self.scratchpad += "Message:\n"
+        self.scratchpad += out.message.content + "\n"
+
+        if len(self.TOOLS):
+            # Append GPT response to next payload
+            # NOTE: This has to come before the next step of parsing
+            self.tool_res_payload.append(deepcopy(out.message))
+
+            # attempt to parse tool call arguments
+            if out.finish_reason == "tool_calls":
+                self.scratchpad += "Tool calls: \n"
+                for i, tool in enumerate(out.message.tool_calls):
+                    out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
+
+                    # Log it
+                    toolcall_str = f"{tool.function.name}({str(tool.funcion.arguments)[:30] + '...(trunc)' if len(str(tool.funcion.arguments)) > 30 else str(tool.funcion.arguments)})"
+                    logger.info(f"Got toolcall: {toolcall_str}")
+                    self.scratchpad += f"\t=> {toolcall_str}\n"
+        
+        self.scratchpad += "\n-----------------------------------\n"
         logger.info(f"Received response: {out.message.content}")
 
         if out.finish_reason == "length":
             self.truncated = True
+            self.scratchpad += "Response returned truncated from OpenAI due to token length.\n"
             logger.warning("Message returned truncated.")
         return out
 
-    @abc.abstractmethod
     def format_prompt(self, **kwargs) -> str:
         """
-        Method which formats the BASE_QUERY string, possibly inserting additional content.
+        Method which formats the BASE_PROMPT string, possibly inserting additional content.
         This is usually called within get_next_message() to populate the first user message.
         """
-        raise NotImplementedError()
+        return re.sub("\s+", " ", self.BASE_PROMPT).format(question=self.question)
 
     def get_next_messages(self) -> list[dict[str, str]]:
         """
@@ -134,10 +262,44 @@ class Agent(metaclass=abc.ABCMeta):
         """
         out = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
-            {"role": "user", "content": self.format_prompt()}
+            {"role": "system", "content": self.format_prompt()}
         ]
         
+        # If we have existing tool response messages, append them
+        if len(self.tool_res_payload):
+            out.extend(self.tool_res_payload)
+        
         return out
+
+    def _handle_tool_calls(self, response: Choice):
+        """
+        Handle all tool calls in response object
+        
+        This gets a method within this class by name and evaluates it with the arguments provided by openai.
+
+        The output of that method is appended to a new message in the tool_res_payload list, for downstream querying.
+        """
+        for tool in response.message.tool_calls:
+            self.scratchpad += "--- Evaluating Toolcalls -----------------\n"
+            # Try to call tool, if present, else raise.
+            try:
+                fun : Callable = getattr(self, tool.function.name)
+                # OpenAI returns as str, which should hopefully eval to dict
+                kwargs : dict[str, any] = tool.function.arguments
+
+                tool_result = fun(**kwargs)
+
+                self.scratchpad
+                self.tool_res_payload.append(
+                    {
+                        "tool_call_id": tool.id,
+                        "role": "tool",
+                        "content": tool_result
+                    }
+                )
+            except Exception as e:
+                logger.error(f"Tool call {tool} failed.")
+                raise e
 
     def is_terminated(self) -> bool:
         return self.terminated
@@ -151,6 +313,7 @@ class Agent(metaclass=abc.ABCMeta):
         """
         self.scratchpad = ""
         self.answer = ""
+        self.tool_res_payload = []
         self.curr_step = 1
         self.truncated = False
         self.terminated = False
@@ -386,14 +549,9 @@ class ChunkedAgent(Agent):
         self.answer_cache = []
         return super().reset()
 
-class ToolAwareAgent(Agent):
+class MultiStepToolAgent(Agent):
     """
-    A base-class for an agent which can utilize OpenAI tool calls.
-    Subclasses would be expected to extend the TOOLS attribute to include additional
-    tools / functions. Each added tool should be appended to the base attribute at init.
-    
-    In addition, each added tool must have a corresponding class method that can be invoked
-    during step() if the GPT calls it.
+    An agent which expects multiple round-trips to complete task before finally calling a :func:`call_submit()` function to finish
     """
 
     TOOLS : list[dict]
@@ -422,119 +580,14 @@ class ToolAwareAgent(Agent):
     tool_res_payload : list[dict]
 
     def __init__(self, question: str, model_name: str, llm: openai.AsyncOpenAI | None = None, tools: Optional[Union[dict, list[dict]]] = None, submit_tool: bool = True, **oai_kwargs):
-        self.TOOLS = []
-        self.tool_res_payload = []
-        if tools is not None:
-            if isinstance(tools, list):
-                self.TOOLS.extend(tools)
-            else:
-                self.TOOLS.append(tools)
-        if submit_tool:
-            self.TOOLS.extend(self.submit_tool)
-
-        super().__init__(question, model_name, llm, **oai_kwargs)
-
-    async def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, tool_use : Literal["required", "auto", "none"] = "auto"):
         
-        out = await super().prompt_agent(prompt, n_tok, tools=self.TOOLS, tool_choice=tool_use)
+        if tools is None and submit_tool:
+            tools = [self.submit_tool]
+        elif submit_tool:
+            tools.append(submit_tool)
 
-        if out is not None:
-            # Append GPT response to next payload
-            # NOTE: This has to come before the next step of parsing
-            self.tool_res_payload.append(deepcopy(out.message))
+        super().__init__(question, model_name, llm, tools=tools, **oai_kwargs)
 
-            # attempt to parse tool call arguments
-            if out.finish_reason == "tool_calls":
-                for i, tool in enumerate(out.message.tool_calls):
-                    out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
-
-        return out
-
-    def get_next_messages(self) -> list[dict[str, str]]:
-        """
-        Get next message payload for GPT, possibly appending tool call result output, if present.
-        """
-        out = super().get_next_messages()
-        # If we have existing tool response messages, append them
-        if len(self.tool_res_payload):
-            out.extend(self.tool_res_payload)
-        
-        return out
-    
-    def _handle_tool_calls(self, response: Choice):
-        """
-        Handle all tool calls in response object
-        
-        This gets a method within this class by name and evaluates it with the arguments provided by openai.
-
-        The output of that method is appended to a new message in the tool_res_payload list, for downstream querying.
-        """
-        for tool in response.message.tool_calls:
-            # Try to call tool, if present, else raise.
-            try:
-                fun : Callable = getattr(self, tool.function.name)
-                # OpenAI returns as str, which should hopefully eval to dict
-                kwargs : dict[str, any] = tool.function.arguments
-
-                self.scratchpad += f"=> Requested toolcall: {tool.function.name}({str(kwargs)[:30] + '...'} <=\n"
-                logger.info(f"Got tool call: {tool.function.name}({str(kwargs)[:30] + '...'})")
-
-                tool_result = fun(**kwargs)
-                self.tool_res_payload.append(
-                    {
-                        "tool_call_id": tool.id,
-                        "role": "tool",
-                        "content": tool_result
-                    }
-                )
-            except Exception as e:
-                logger.error(f"Tool call {tool} failed.")
-                raise e
-
-    async def step(self):
-        # Pull base query + system messages
-        # (abstract)
-        llm_prompt_input = self.get_next_messages()
-
-        # Send off messages for reply
-        self.scratchpad += f"=== Input {self.curr_step} ==========\n"
-        self.scratchpad += "\n".join(msg["content"] for msg in llm_prompt_input if not isinstance(msg, ChatCompletionMessage))
-        self.scratchpad += "\n===================================\n"
-    
-        # Attempt to query GPT and handle invalid JSON parsing of args
-        response = None
-        n_retry = 3
-        while response is None and n_retry > 0:
-            try:
-                response = await self.prompt_agent(llm_prompt_input)
-            except json.decoder.JSONDecodeError as e:
-                if n_retry == 0:
-                    raise e
-                else:
-                    logger.warning(f"Tool calls in response couldn't be decoded. {n_retry} retries remaining.")
-                    llm_prompt_input.append(
-                        {
-                            "role": "user",
-                            "content": "The arguments to your previous tool call couldn't be parsed correctly. Please ensure you properly escapse quotes and construct a valid JSON payload."
-                        }
-                    )
-                    n_retry -= 1
-                    continue
-        if response is None:
-            logger.warning("No response after 3 retries, Terminating!")
-            self.truncated = True
-        else:
-            if response.finish_reason == "length":
-                # Determine if we're truncated
-                self.truncated = True
-                logger.warning("Response truncated due to length, Terminating!")
-            # Recursive call if tool calls in response
-            elif response.finish_reason == "tool_calls":
-                self._handle_tool_calls(response)
-            
-        # End Step
-        self.curr_step += 1
-    
     def call_submit(self, input: str, clean: bool = False) -> None:
         """
         Final response call, which terminates further processing
@@ -545,13 +598,6 @@ class ToolAwareAgent(Agent):
         self.scratchpad += out_msg
         self.answer = out_msg
         self.terminated = True
-    
-    def reset(self) -> None:
-        self.tool_res_payload = []
-        return super().reset()
-
-    def format_prompt(self) -> str:
-        return re.sub("\s+", " ", self.BASE_PROMPT).format(question=self.question)
     
     @staticmethod
     def _subprocess_tool_call_on_file(tool_input: str, cmd_args: list[str], output_type: Literal["stdout", "file"] = "stdout") -> str:

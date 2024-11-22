@@ -10,14 +10,16 @@ import openai
 import polars as pl
 import pydantic
 
-from .base import ToolAwareAgent
+from .base import Agent
 
 logger = logging.getLogger(__name__)
 
 
-class PredictionAgent(ToolAwareAgent):
+class PredictionAgent(Agent):
     """
-    A language agent which returns a structured prediction
+    A language agent which returns a structured prediction given a polars DataFrame input.
+    
+    The result from the agent should be a `list[str]` of `len(df.height)`
     """
 
     answer: list[str]
@@ -31,7 +33,7 @@ class PredictionAgent(ToolAwareAgent):
         **oai_kwargs,
     ):
         """
-        A ToolAwareAgent where the output is a prediction for each row of `df` from one of the choices in `labels`
+        An Agent where the output is a prediction for each row of `df` from one of the choices in `labels`
         :param df: The data to classify
         :param model_name: The Azure OpenAI model name to use
         :param labels: The set of categorical labels the model can choose from
@@ -46,13 +48,13 @@ class PredictionAgent(ToolAwareAgent):
             model_name=model_name,
             llm=llm,
             tools=self.response_tool,
-            submit_tool=False,
+            tool_choice = "required", # Require a tool call
             **oai_kwargs
         )
 
     def _build_pydantic_model(self):
         """
-        Construct a pydantic model that we'll use to force the LLM to return a structured resposne
+        Construct a pydantic model that we'll use to force the LLM to return a structured response
         """
 
         self.response_model = pydantic.create_model(
