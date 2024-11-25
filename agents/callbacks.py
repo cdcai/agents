@@ -38,11 +38,12 @@ class AgentCallback(_Callback):
         self.agent_class = agent_class
         self.agent_kwargs = agent_kwargs
 
-    def __call__(self, cls: Agent, answer: str, scratchpad: str) -> None:
+    async def __call__(self, cls: Agent, answer: str, scratchpad: str) -> None:
         """
         Run new callback agent on calling agent's answer and scratchpad and append output.
         """
-        
+
         self.callback_agent = self.agent_class(**self.agent_kwargs, answer=answer, scratchpad=scratchpad)
-        cls.callback_output.append(self.callback_agent())
+        await self.callback_agent.run()
+        cls.callback_output.append(self.callback_agent.answer)
 

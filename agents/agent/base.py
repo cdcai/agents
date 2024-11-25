@@ -10,16 +10,15 @@ from typing import Callable, Literal, Optional, Union, List
 from copy import deepcopy
 
 import backoff
-import gymnasium as gym
 import openai
-import tiktoken
 from azure.identity import ClientSecretCredential
-from openai.types.chat.chat_completion import Choice, ChatCompletionMessage
+from openai.types.chat.chat_completion import ChatCompletionMessage
+from ..abstract import _Agent
 
 logger = logging.getLogger(__name__)
 
 
-class Agent:
+class Agent(_Agent):
     """
     Base Class for language agents, which can be initialized directly or subclassed depending on use case.
 
@@ -34,7 +33,9 @@ class Agent:
     :param dict oai_kwargs: OpenAI arguments passed as-is to API (temperature, top_p, etc.)
     :param list TOOLS: List of tools the agent can use. Can be defined in subclass or at runtime. (see: https://platform.openai.com/docs/guides/function-calling)
     :param list CALLBACKS: List of callbacks to evaluate at completion. Should be a list of callables with a signature `fun(self, answer, scratchpad)`
-
+    :param _StoppingCondition stopping_condition: The StoppingCondition handler class which will be called after each step to determine if the task is completed.
+    
+    
     Tool Use
     --------
     Each added tool must have a corresponding class method that can be invoked during :func:`step()` if the GPT calls it.
@@ -45,32 +46,12 @@ class Agent:
     Each callback will have access to class object, scratchpad, and final answer, thus the signature must match.
     This is still quite experimental, but the intended usecase is for reflection / refinement applications.
     """
-    terminated: bool = False
-    truncated: bool = False
-    curr_step: int = 1
-    output_len: int = 1
-    scratchpad: str = ""
-    answer: str = ""
-    BASE_PROMPT: str = ""
-    SYSTEM_PROMPT: str = ""
-    oai_kwargs : dict
-    TOOLS : list
-    CALLBACKS : list
-    callback_output: list
-
-    def __init__(
-        self,
-        model_name: str,
-        llm: Optional[openai.AsyncOpenAI] = None,
-        tools: Optional[List[dict]] = None,
-        callbacks: Optional[List[Callable]] = None,
-        oai_kwargs: Optional[dict[str, any]] = None,
-        **fmt_kwargs
-    ):
+    def __init__(self, model_name, stopping_condition, llm = None, tools = None, callbacks = None, oai_kwargs = None, **fmt_kwargs):
         """
         Base Agent class
 
         :param str model_name: Name of OpenAI model to use (or deployment name for AzureOpenAI)
+        :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task
         :param AsyncOpenAI llm: Instantiated OpenAI instance to use (optional)
         :param List[dict] tools: List of tools the agent can call via response (optional)
         :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
@@ -78,6 +59,7 @@ class Agent:
         :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
         """
         self.fmt_kwargs = fmt_kwargs
+        self.stopping_condition = stopping_condition
         # We default to Azure OpenAI here, but
         # we could also use something else as long as it follows the OpenAI API
         if llm is None:
@@ -99,21 +81,21 @@ class Agent:
         if callbacks is not None:
             self.CALLBACKS.extend(callbacks)
 
-        self.oai_kwargs = {"temperature": 0.0}
-        self.oai_kwargs.update(oai_kwargs)
+        self.oai_kwargs = oai_kwargs if oai_kwargs is not None else {}
+
         self.reset()
 
     async def run(self, reset: bool = False, *kwargs) -> None:
         if reset:
             self.reset()
 
-        while not (self.is_terminated() or self.is_truncated()):
+        while not (self.is_terminated or self.is_truncated):
             logger.debug(f"Running step {self.curr_step}.")
             await self.step()
         
         # Evaluate callbacks, if available
         for callback in self.CALLBACKS:
-            callback(self, answer=self.answer, scratchpad=self.scratchpad)
+            await callback(self, answer=self.answer, scratchpad=self.scratchpad)
 
     async def __call__(self, *args, **kwargs) -> str:
         """
@@ -175,13 +157,37 @@ class Agent:
             # Recursive call if tool calls in response
             elif response.finish_reason == "tool_calls":
                 self._handle_tool_calls(response)
-            
+        
+        # Check if we've reached a stopping place
+        if self.stopping_condition(self, response):
+            self.answer = response.message.content
+            self.terminated = True
+            logger.info("Stopping condition signaled, terminating.")
+
         # End Step
         self.scratchpad += "==============================\n\n"
         self.curr_step += 1
 
+    @staticmethod
+    def authenticate():
+        """
+        Authenticate against Azure OpenAI using Service Principal
+        """
+        # === Service Principal auth ========================
+        credential = ClientSecretCredential(
+            tenant_id=os.environ["SP_TENANT_ID"],
+            client_id=os.environ["SP_CLIENT_ID"],
+            client_secret=os.environ["SP_CLIENT_SECRET"],
+        )
+
+        os.environ["AZURE_OPENAI_API_KEY"] = credential.get_token(
+            "https://cognitiveservices.azure.com/.default"
+        ).token
+
+        os.environ["AZURE_OPENAI_ENDPOINT"] = os.environ["GPT4_URL"]
+
     @backoff.on_exception(backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3)
-    async def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **addn_oai_kwargs) -> Choice:
+    async def prompt_agent(self, prompt, n_tok = None, **addn_oai_kwargs):
         """
         An async version of the main OAI prompting logic.
 
@@ -267,14 +273,14 @@ class Agent:
             {"role": "system", "content": self.SYSTEM_PROMPT},
             {"role": "system", "content": self.format_prompt()}
         ]
-        
+
         # If we have existing tool response messages, append them
         if len(self.tool_res_payload):
             out.extend(self.tool_res_payload)
         
         return out
 
-    def _handle_tool_calls(self, response: Choice):
+    def _handle_tool_calls(self, response):
         """
         Handle all tool calls in response object
         
@@ -292,7 +298,9 @@ class Agent:
 
                 tool_result = fun(**kwargs)
 
-                self.scratchpad
+                self.scratchpad += f"\t=> {tool.function.name}()\n"
+                self.scratchpad += tool_result + "\n\n"
+
                 self.tool_res_payload.append(
                     {
                         "tool_call_id": tool.id,
@@ -301,14 +309,10 @@ class Agent:
                     }
                 )
             except Exception as e:
-                logger.error(f"Tool call {tool} failed.")
+                logger.error(f"Tool call {tool.function.name} failed.")
                 raise e
 
-    def is_terminated(self) -> bool:
-        return self.terminated
-
-    def is_truncated(self) -> bool:
-        return self.truncated
+            self.scratchpad += "---------------------------------\n\n"
 
     def reset(self) -> None:
         """
@@ -322,35 +326,12 @@ class Agent:
         self.truncated = False
         self.terminated = False
 
-    def dump(self, outfile: Union[str, os.PathLike]) -> None:
+    def dump(self, outfile):
         """
         Dump scratchfile to disk
         """
         with open(outfile, "w", encoding="utf-8") as file:
             file.writelines(elem + "\n" for elem in self.scratchpad.split("\n"))
-
-    @staticmethod
-    def clean_response(res: str) -> str:
-        out = res.strip('\n').strip().replace('\n', '')
-        return out
-
-    @staticmethod
-    def authenticate() -> None:
-        """
-        Authenticate against Azure OpenAI using Service Principal
-        """
-        # === Service Principal auth ========================
-        credential = ClientSecretCredential(
-            tenant_id=os.environ["SP_TENANT_ID"],
-            client_id=os.environ["SP_CLIENT_ID"],
-            client_secret=os.environ["SP_CLIENT_SECRET"],
-        )
-
-        os.environ["AZURE_OPENAI_API_KEY"] = credential.get_token(
-            "https://cognitiveservices.azure.com/.default"
-        ).token
-
-        os.environ["AZURE_OPENAI_ENDPOINT"] = os.environ["GPT4_URL"]
 
 class MultiStepToolAgent(Agent):
     """
