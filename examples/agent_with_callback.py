@@ -5,8 +5,14 @@ Sean Browning
 import asyncio
 import agents
 import logging
+import openai
+import dotenv
 
-logger = logging.basicConfig()
+# NOTE: This loads in env vars for openAI
+dotenv.load_dotenv()
+
+# Uncomment to see under the hood a bit more
+# logger = logging.basicConfig(level=logging.INFO)
 
 class DummyAgent(agents.Agent):
     """
@@ -33,13 +39,21 @@ class DummyEvaluatorAgent(agents.Agent):
     """
 
 if __name__ == "__main__":
+
+    # Run this with Interactive OAuth
+    agents.openai_creds_ad("Interactive")
+
+    llm = openai.AsyncAzureOpenAI()
+
     ag = DummyAgent(
         model_name = "edav-api-share-gpt4-api-nofilter",
         stopping_condition=agents.StopOnStep(1),
+        llm=llm,
         callbacks=[
             agents.AgentCallback(
                 DummyEvaluatorAgent,
                 model_name="edav-api-share-gpt4-api-nofilter",
+                llm=llm,
                 stopping_condition=agents.StopOnStep(1)
             )
         ],
