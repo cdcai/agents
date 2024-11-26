@@ -11,9 +11,12 @@ from copy import deepcopy
 
 import backoff
 import openai
+from pydantic import BaseModel
 from azure.identity import ClientSecretCredential
 from openai.types.chat.chat_completion import ChatCompletionMessage
 from ..abstract import _Agent
+from ..stopping_conditions import StopOnBaseModel
+from ..decorators import response_model_handler
 
 logger = logging.getLogger(__name__)
 
@@ -337,6 +340,36 @@ class Agent(_Agent):
         """
         with open(outfile, "w", encoding="utf-8") as file:
             file.writelines(elem + "\n" for elem in self.scratchpad.split("\n"))
+
+class StructuredOutputAgent(Agent):
+    """
+    An Agent with accepts a pydantic BaseModel to use as a tool / validator for model output
+
+    A class method is constructed at runtime along with a stopping condition which triggers when a `response_model` object is detected in the response.
+    """
+
+    def __init__(self, response_model: BaseModel, model_name, stopping_condition=None, llm=None, tools=None, callbacks=None, oai_kwargs=None, **fmt_kwargs):
+        self.response_model = response_model
+        self.output_len = len(self.response_model.model_fields)
+        
+        if stopping_condition is None:
+            stopping_condition = StopOnBaseModel(response_model)
+        else:
+            logger.warning("StructuredOutputAgent assumes a `StopOnBaseModel` stopping condition, but you passed another at runtime which will take precedence. This may lead to errors.")
+
+        oai_tool = openai.pydantic_function_tool(response_model)
+
+        if tools is not None:
+            tools.append(oai_tool)
+        else:
+            tools = [oai_tool]
+
+        # Assign a class method 
+        fun_name = oai_tool["function"]["name"]
+        setattr(self, fun_name, response_model_handler(self.response_model))
+
+        super().__init__(model_name, stopping_condition, llm, tools, callbacks, oai_kwargs, **fmt_kwargs)
+    
 
 class MultiStepToolAgent(Agent):
     """

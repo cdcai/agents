@@ -1,4 +1,6 @@
 from .abstract import _StoppingCondition
+from pydantic import BaseModel
+from typing import Optional
 
 class StopOnStep(_StoppingCondition):
     """
@@ -13,6 +15,21 @@ class StopOnStep(_StoppingCondition):
     def __call__(self, cls, response) -> str:
         if cls.curr_step >= self.step:
             return response.message.content
+        else:
+            return None
+
+class StopOnBaseModel(_StoppingCondition):
+    """
+    A stopping condition that checks whether the final tool call was an instance of the provided class.
+
+    Useful for terminating once we receive correctly parsed / structured output
+    """
+    def __init__(self, answer_cls: BaseModel):
+        self.answer_cls = answer_cls
+
+    def __call__(self, cls, response) -> Optional[dict]:
+        if isinstance(cls.tool_res_payload[-1], self.answer_cls):
+            return cls.tool_res_payload[-1].model_dump() # pydantic.BaseModel.model_dump() -> dict[str, Any]
         else:
             return None
 

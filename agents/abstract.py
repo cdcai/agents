@@ -35,6 +35,7 @@ class _Agent(metaclass=abc.ABCMeta):
     TOOLS : list
     CALLBACKS : list
     callback_output: list
+    tool_res_payload: list[dict]
 
     def __init__(
         self,
