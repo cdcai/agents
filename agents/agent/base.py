@@ -82,6 +82,7 @@ class Agent(_Agent):
             self.CALLBACKS.extend(callbacks)
 
         self.oai_kwargs = oai_kwargs if oai_kwargs is not None else {}
+        self.oai_kwargs.update({"tools": self.TOOLS})
 
         self.reset()
 
