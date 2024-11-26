@@ -4,10 +4,10 @@ All abstract classes
 import abc
 import logging
 import os
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Union, Any
 
 import openai
-from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion import Choice, ChatCompletionMessage
 
 logger = logging.getLogger(__name__)
 
@@ -16,11 +16,10 @@ class _StoppingCondition(metaclass=abc.ABCMeta):
     A callable that contains some logic to determine whether a language agent
     has finished it's run.
 
-    The main call should always return a bool, which will be used to signal
-    termination in the Agent class.
+    The main call should always return the final answer, if we've finished the run, or None otherwise
     """
     @abc.abstractmethod
-    def __call__(self, cls: '_Agent', response: str) -> bool:
+    def __call__(self, cls: '_Agent', response: str) -> Optional[Any]:
         raise NotImplementedError()
 
 class _Agent(metaclass=abc.ABCMeta):
@@ -61,6 +60,15 @@ class _Agent(metaclass=abc.ABCMeta):
         finished or run out of tokens.
         """
         raise NotImplementedError()
+
+    @abc.abstractmethod
+    def _check_stop_condition(self, response: ChatCompletionMessage) -> None:
+        """
+        Called from within :func:`step()`.
+        Checks whether our stop condition has been met and handles assignment of answer, if so.
+
+        It's broken out this way because we may not always want to use message.content as the answer (tool call output, for instance)
+        """
 
     @abc.abstractmethod
     def format_prompt(self, **kwargs) -> str:

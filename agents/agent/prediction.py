@@ -4,13 +4,15 @@ Sean Browning (oet5)
 """
 
 import logging
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Callable
 
 import openai
 import polars as pl
 import pydantic
 
 from .base import Agent
+from ..abstract import _StoppingCondition
+from ..stopping_conditions import StopNoOp
 
 logger = logging.getLogger(__name__)
 
@@ -27,37 +29,64 @@ class PredictionAgent(Agent):
     def __init__(
         self,
         df: pl.DataFrame,
-        model_name: str,
         labels: list[str],
-        llm: openai.AsyncOpenAI | None = None,
-        **oai_kwargs,
+        model_name: str,
+        stopping_condition: Optional[_StoppingCondition] = None,
+        llm: Optional[openai.AsyncOpenAI] = None,
+        tools: Optional[List[dict]] = None,
+        callbacks: Optional[List[Callable]] = None,
+        oai_kwargs: Optional[dict[str, any]] = None,
+        **fmt_kwargs
     ):
         """
         An Agent where the output is a prediction for each row of `df` from one of the choices in `labels`
-        :param df: The data to classify
-        :param model_name: The Azure OpenAI model name to use
+        
+        
+        :param df: The data to classify (the ndJSON format of this will be available as `df` to format the BASE_PROMPT)
         :param labels: The set of categorical labels the model can choose from
-        :param llm: (optional) An OpenAI instance, otherwise one will be created via ClientSecret credentials internally
-        :param oai_kwargs: Additional key word args to pass to the OpenAI Chat Completion API (temperature, top_k, etc.)
+        :param str model_name: Name of OpenAI model to use (or deployment name for AzureOpenAI)
+        :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task (optional)
+        :param AsyncOpenAI llm: Instantiated OpenAI instance to use (optional)
+        :param List[dict] tools: List of tools the agent can call via response (optional)
+        :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
+        :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
+        :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
         """
         self.labels = labels
         self.expected_n = df.height
-        self._build_pydantic_model()
+        self.response_tool = self._build_pydantic_model()
+
+        if tools is None:
+            tools = []
+        
+        if oai_kwargs is None:
+            oai_kwargs = {}
+        
+        oai_kwargs.update({"tool_choice": "required"}) # Require a tool call)
+        tools.append(self.response_tool)
+
+        if stopping_condition is not None:
+            logger.warning("A stopping condition was passed to Prediction Agent. This may lead to unexpected results.")
+        else:
+            stopping_condition = StopNoOp()
+
         super().__init__(
-            question=df.write_ndjson(),
             model_name=model_name,
+            stopping_condition=stopping_condition,
             llm=llm,
-            tools=self.response_tool,
-            tool_choice = "required", # Require a tool call
-            **oai_kwargs
+            tools=tools,
+            callbacks=callbacks,
+            oai_kwargs=oai_kwargs,
+            df=df.write_ndjson(),
+            **fmt_kwargs
         )
 
-    def _build_pydantic_model(self):
+    def _build_pydantic_model(self) -> dict:
         """
         Construct a pydantic model that we'll use to force the LLM to return a structured response
         """
 
-        self.response_model = pydantic.create_model(
+        response_model = pydantic.create_model(
             "classify",
             labels=(
                 List[Literal[tuple(self.labels)]],
@@ -68,15 +97,20 @@ class PredictionAgent(Agent):
             ),
         )
 
-        self.response_tool = openai.pydantic_function_tool(
-            self.response_model,
+        response_tool = openai.pydantic_function_tool(
+            response_model,
             name="classify",
             description="Classify the data using one of the possible categories",
         )
 
+        return response_tool
+
     def classify(self, labels: list[str]) -> Optional[str]:
         """
-        Function to "classify" ADE, which inspects that the LLM provided a response of the correct length and used only the labels provided
+        Check classification. Inspects that the LLM provided a response of the correct length and used only the labels provided.
+        
+        HACK: The logic here is unfortunately doing double duty, because it's a tool call but also signaling a stop condition.
+        I'd like to de-couple that at some point, but I'm not sure the best approach.
         """
         if len(labels) != self.expected_n:
             logger.warning(f"Invalid return length: {len(labels)}, retrying.")
@@ -105,21 +139,6 @@ class PredictionAgent(Agent):
         self.truncated = False
         self.terminated = False
 
-    async def run(self, reset: bool = False, steps: Optional[int] = None) -> None:
-        """
-        Run the agent, optionally running only a fixed number of steps
-        """
-        if reset:
-            self.reset()
-
-        if steps is not None:
-            for _ in range(steps):
-                logger.debug(f"Running step {self.curr_step}.")
-                await self.step()
-                if self.is_terminated() or self.is_truncated():
-                    break
-        else:
-            await super().run(reset)
 
 class PredictionAgentWithJustification(PredictionAgent):
     """
@@ -160,7 +179,7 @@ class PredictionAgentWithJustification(PredictionAgent):
 
     def classify(self, labels: list[str], justification: list[str]) -> Optional[str]:
         """
-        Function to "classify" ADE, which inspects that the LLM provided a response of the correct length and used only the labels provided
+        Check classification. Inspects that the LLM provided a response of the correct length and used only the labels provided.
         """
         if len(labels) != self.expected_n:
             logger.warning(f"Invalid return length: {len(labels)}, retrying.")

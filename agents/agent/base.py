@@ -92,7 +92,7 @@ class Agent(_Agent):
         while not (self.is_terminated or self.is_truncated):
             logger.debug(f"Running step {self.curr_step}.")
             await self.step()
-        
+
         # Evaluate callbacks, if available
         for callback in self.CALLBACKS:
             await callback(self, answer=self.answer, scratchpad=self.scratchpad)
@@ -112,6 +112,13 @@ class Agent(_Agent):
             self.dump(outfile)
 
         return self.answer
+
+    def _check_stop_condition(self, response):
+        # Check if we've reached a stopping place
+        if answer := self.stopping_condition(self, response) is not None:
+            self.answer = answer
+            self.terminated = True
+            logger.info("Stopping condition signaled, terminating.")
 
     async def step(self):
         """
@@ -158,11 +165,8 @@ class Agent(_Agent):
             elif response.finish_reason == "tool_calls":
                 self._handle_tool_calls(response)
         
-        # Check if we've reached a stopping place
-        if self.stopping_condition(self, response):
-            self.answer = response.message.content
-            self.terminated = True
-            logger.info("Stopping condition signaled, terminating.")
+        # Conditionally end run and assign answer
+        self._check_stop_condition(response)
 
         # End Step
         self.scratchpad += "==============================\n\n"
