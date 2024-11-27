@@ -59,10 +59,6 @@ class PredictionAgent(Agent):
         if tools is None:
             tools = []
         
-        if oai_kwargs is None:
-            oai_kwargs = {}
-        
-        oai_kwargs.update({"tool_choice": "required"}) # Require a tool call)
         tools.append(self.response_tool)
 
         if stopping_condition is not None:
