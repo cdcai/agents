@@ -19,5 +19,7 @@ setup(
     license='MIT',
     packages=find_packages(include=["agents", "agents.*"]),
     install_requires=requirements,
-    zip_safe=False
+    tests_require=[
+        "pytest",
+    ]
 )
