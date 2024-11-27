@@ -1,11 +1,11 @@
 from functools import wraps, partial
-from typing import Optional, Callable, Union
+from typing import Optional, Union
 import pydantic
 import logging
 
 logger = logging.getLogger(__name__)
 
-def response_model_handler(func: Optional[pydantic.BaseModel], /, *, expected_len: Optional[int] = None):
+def response_model_handler(func: Optional[type[pydantic.BaseModel]], /, *, expected_len: Optional[int] = None):
     """
     A decorator that wraps a Pydantic BaseModel and returns string output in the event of parsing errors or the correctly parsed model object otherwise.
 
@@ -16,7 +16,7 @@ def response_model_handler(func: Optional[pydantic.BaseModel], /, *, expected_le
         return partial(response_model_handler, expected_len=expected_len)
 
     @wraps(func)
-    def inner_wrapper(*args, **kwargs) -> Union[dict, str]:
+    def inner_wrapper(*args, **kwargs) -> Union[type[pydantic.BaseModel], str]:
 
         try:
             parsed = func(*args, **kwargs)
@@ -26,7 +26,7 @@ def response_model_handler(func: Optional[pydantic.BaseModel], /, *, expected_le
         
         if expected_len:
             # Determine if length mismatch exists
-            vars_mismatch = [f"{var}: {len(arr)} != {expected_len}" for var, arr in parsed.items() if len(arr) != expected_len]
+            vars_mismatch = [f"{var}: {len(arr)} != {expected_len}" for var, arr in parsed.model_dump().items() if len(arr) != expected_len]
             
             if len(vars_mismatch):
                 logger.warning(f"Got the following length mismatches in parsed args:\n{vars_mismatch}")

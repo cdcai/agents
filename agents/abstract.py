@@ -28,7 +28,7 @@ class _Agent(metaclass=abc.ABCMeta):
     curr_step: int = 1
     output_len: int = 1
     scratchpad: str = ""
-    answer: str = ""
+    answer: Any = ""
     BASE_PROMPT: str = ""
     SYSTEM_PROMPT: str = ""
     oai_kwargs : dict
@@ -54,7 +54,7 @@ class _Agent(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    async def step():
+    async def step(self):
         """
         Run a single "step" of the agent logic.
         Handles prompting OpenAI, optionally handling tool calls, and determining whether we've
@@ -110,5 +110,5 @@ class _Agent(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def reset():
+    def reset(self):
         raise NotImplementedError()
