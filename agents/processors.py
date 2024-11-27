@@ -121,7 +121,10 @@ class _BatchProcessor(metaclass=ABCMeta):
         # De-queue into list from output queue
         out = []
         for _, msg in self.dequeue(self.out_q):
-            out.extend(msg)
+            if isinstance(msg, list):
+                out.extend(msg)
+            else:
+                out.append(msg)
 
         return out
 
