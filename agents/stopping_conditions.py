@@ -28,8 +28,8 @@ class StopOnBaseModel(_StoppingCondition):
         self.answer_cls = answer_cls
 
     def __call__(self, cls, response) -> Optional[dict]:
-        if isinstance(cls.tool_res_payload[-1], self.answer_cls):
-            return cls.tool_res_payload[-1].model_dump() # pydantic.BaseModel.model_dump() -> dict[str, Any]
+        if isinstance(cls.tool_res_payload[-1]["content"], self.answer_cls):
+            return cls.tool_res_payload[-1]["content"].model_dump() # pydantic.BaseModel.model_dump() -> dict[str, Any]
         else:
             return None
 

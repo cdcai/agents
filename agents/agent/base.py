@@ -85,7 +85,9 @@ class Agent(_Agent):
             self.CALLBACKS.extend(callbacks)
 
         self.oai_kwargs = oai_kwargs if oai_kwargs is not None else {}
-        self.oai_kwargs.update({"tools": self.TOOLS})
+        
+        if len(self.TOOLS):
+            self.oai_kwargs.update({"tools": self.TOOLS})
 
         self.reset()
 
@@ -119,7 +121,7 @@ class Agent(_Agent):
 
     def _check_stop_condition(self, response):
         # Check if we've reached a stopping place
-        if answer := self.stopping_condition(self, response) is not None:
+        if (answer := self.stopping_condition(self, response)) is not None:
             self.answer = answer
             self.terminated = True
             logger.info("Stopping condition signaled, terminating.")
@@ -238,7 +240,7 @@ class Agent(_Agent):
 
         self.scratchpad += "--- Output --------------------------\n"
         self.scratchpad += "Message:\n"
-        self.scratchpad += out.message.content + "\n"
+        self.scratchpad += out.message.content if out.message.content else "<None>" + "\n"
 
         if len(self.TOOLS):
             # Append GPT response to next payload
@@ -252,7 +254,7 @@ class Agent(_Agent):
                     out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
 
                     # Log it
-                    toolcall_str = f"{tool.function.name}({str(tool.funcion.arguments)[:30] + '...(trunc)' if len(str(tool.funcion.arguments)) > 30 else str(tool.funcion.arguments)})"
+                    toolcall_str = f"{tool.function.name}({str(tool.function.arguments)[:30] + '...(trunc)' if len(str(tool.function.arguments)) > 30 else str(tool.funcion.arguments)})"
                     logger.info(f"Got toolcall: {toolcall_str}")
                     self.scratchpad += f"\t=> {toolcall_str}\n"
         
@@ -307,7 +309,7 @@ class Agent(_Agent):
                 tool_result = fun(**kwargs)
 
                 self.scratchpad += f"\t=> {tool.function.name}()\n"
-                self.scratchpad += tool_result + "\n\n"
+                self.scratchpad += tool_result if type(tool_result) == str else repr(tool_result) + "\n\n"
 
                 self.tool_res_payload.append(
                     {
@@ -347,6 +349,7 @@ class StructuredOutputAgent(Agent):
 
     A class method is constructed at runtime along with a stopping condition which triggers when a `response_model` object is detected in the response.
     """
+    answer: dict[str, any]
 
     def __init__(self, response_model: BaseModel, model_name, stopping_condition=None, llm=None, tools=None, callbacks=None, oai_kwargs=None, **fmt_kwargs):
         self.response_model = response_model

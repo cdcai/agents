@@ -29,7 +29,7 @@ def response_model_handler(func: Optional[pydantic.BaseModel], /, *, expected_le
             vars_mismatch = [f"{var}: {len(arr)} != {expected_len}" for var, arr in parsed.items() if len(arr) != expected_len]
             
             if len(vars_mismatch):
-                logger.warning(f"Got the following length mismatches in parsed args:\n{"\n".join(vars_mismatch)}")
+                logger.warning(f"Got the following length mismatches in parsed args:\n{vars_mismatch}")
                 return "Length mismatch in return:\n{}".format("\n".join(vars_mismatch))
             
         return parsed

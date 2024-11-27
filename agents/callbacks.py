@@ -29,6 +29,9 @@ class AgentCallback(_Callback):
         Create an Agent Callback, i.e. an Agent which will be called at the
         end of an Agent run with the answer and scratchpad.
 
+        The provided `agent_class` will be initialized at the end of the run with
+        `answer` and `scratchpad` variables passed to format the `BASE_PROMPT`
+        
         Possible use cases could include reflection/reaction on llm agent feedback,
         summarization of task, etc.
 
