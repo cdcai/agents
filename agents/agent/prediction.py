@@ -4,27 +4,24 @@ Sean Browning (oet5)
 """
 
 import logging
-from typing import List, Literal, Optional, Callable
+from typing import Callable, List, Literal, Optional, Any
 
 import openai
 import polars as pl
 import pydantic
 
-from .base import Agent
 from ..abstract import _StoppingCondition
-from ..stopping_conditions import StopNoOp
+from .base import Agent, StructuredOutputAgent
 
 logger = logging.getLogger(__name__)
 
 
-class PredictionAgent(Agent):
+class PredictionAgent(StructuredOutputAgent):
     """
     A language agent which returns a structured prediction given a polars DataFrame input.
     
-    The result from the agent should be a `list[str]` of `len(df.height)`
+    The result from the agent should be a `dict[str, list]` with one element, "labels", of `len(df.height)`
     """
-
-    answer: list[str]
 
     def __init__(
         self,
@@ -35,7 +32,7 @@ class PredictionAgent(Agent):
         llm: Optional[openai.AsyncOpenAI] = None,
         tools: Optional[List[dict]] = None,
         callbacks: Optional[List[Callable]] = None,
-        oai_kwargs: Optional[dict[str, any]] = None,
+        oai_kwargs: Optional[dict[str, Any]] = None,
         **fmt_kwargs
     ):
         """
@@ -54,20 +51,12 @@ class PredictionAgent(Agent):
         """
         self.labels = labels
         self.expected_n = df.height
-        self.response_tool = self._build_pydantic_model()
-
-        if tools is None:
-            tools = []
-        
-        tools.append(self.response_tool)
-
-        if stopping_condition is not None:
-            logger.warning("A stopping condition was passed to Prediction Agent. This may lead to unexpected results.")
-        else:
-            stopping_condition = StopNoOp()
+        response_model = self._build_pydantic_model()
 
         super().__init__(
+            response_model,
             model_name=model_name,
+            expected_len=self.expected_n,
             stopping_condition=stopping_condition,
             llm=llm,
             tools=tools,
@@ -77,7 +66,7 @@ class PredictionAgent(Agent):
             **fmt_kwargs
         )
 
-    def _build_pydantic_model(self) -> dict:
+    def _build_pydantic_model(self) -> type[pydantic.BaseModel]:
         """
         Construct a pydantic model that we'll use to force the LLM to return a structured response
         """
@@ -85,6 +74,8 @@ class PredictionAgent(Agent):
         response_model = pydantic.create_model(
             "classify",
             labels=(
+                # HACK: This is a bodge to build a model with labels only known at runtime
+                # but it will fail static typing in doing so
                 List[Literal[tuple(self.labels)]],
                 pydantic.Field(
                     alias="labels",
@@ -93,47 +84,7 @@ class PredictionAgent(Agent):
             ),
         )
 
-        response_tool = openai.pydantic_function_tool(
-            response_model,
-            name="classify",
-            description="Classify the data using one of the possible categories",
-        )
-
-        return response_tool
-
-    def classify(self, labels: list[str]) -> Optional[str]:
-        """
-        Check classification. Inspects that the LLM provided a response of the correct length and used only the labels provided.
-        
-        HACK: The logic here is unfortunately doing double duty, because it's a tool call but also signaling a stop condition.
-        I'd like to de-couple that at some point, but I'm not sure the best approach.
-        """
-        if len(labels) != self.expected_n:
-            logger.warning(f"Invalid return length: {len(labels)}, retrying.")
-            return f"Input was of length {self.expected_n} but you returned a response of length {len(labels)}. Please try again."
-
-        try:
-            # End our run if we make it through this
-            parsed_args = self.response_model(labels=labels)
-            self.answer = parsed_args.labels
-            self.terminated = True
-            self.scratchpad += "===== Answer ==========\n"
-            self.scratchpad += str(self.answer)
-            logger.info("Got valid response, terminating.")
-        except pydantic.ValidationError:
-            logger.warning(f"Response didn't pass pydantic validation, retrying.")
-            # HACK: the default message from pydantic would be pretty long and lead to context length issues
-            # so I'm making my own
-            invalid_labels = [val for val in labels if val not in self.labels]
-            return f"Pydantic validation of function call failed because you passed the following invalid label(s): {invalid_labels}. Please retry using ONLY the labels allowed."
-
-    def reset(self) -> None:
-        self.tool_res_payload = []
-        self.scratchpad = ""
-        self.answer = []
-        self.curr_step = 1
-        self.truncated = False
-        self.terminated = False
+        return response_model
 
 
 class PredictionAgentWithJustification(PredictionAgent):
@@ -142,7 +93,6 @@ class PredictionAgentWithJustification(PredictionAgent):
 
     The label and justification are supplied in the same tool call / response body rather than in separate messages to improve coherence.
     """
-    output_len: int = 2 # Each sample has two components: a label, and a justification
     def _build_pydantic_model(self):
         """
         Construct a pydantic model that we'll use to force the LLM to return a structured response.
@@ -172,29 +122,3 @@ class PredictionAgentWithJustification(PredictionAgent):
             name="classify",
             description="Classify the data using one of the possible categories and, for each classification, provide a short description of your reasoning.",
         )
-
-    def classify(self, labels: list[str], justification: list[str]) -> Optional[str]:
-        """
-        Check classification. Inspects that the LLM provided a response of the correct length and used only the labels provided.
-        """
-        if len(labels) != self.expected_n:
-            logger.warning(f"Invalid return length: {len(labels)}, retrying.")
-            return f"Input was of length {self.expected_n} but you returned a response of length {len(labels)}. Please try again."
-
-        if len(justification) != len(labels):
-            logger.warning(f"Invalid justification length: {len(justification)} != {len(labels)}, retrying.")
-            return f"You should have provided one justification for each classification you provided ({len(labels)}), but I only recieved {len(justification)}. Please try again."
-        try:
-            # End our run if we make it through this
-            parsed_args = self.response_model(labels=labels, justification=justification)
-            self.answer = [(ans, just) for ans, just in zip(parsed_args.labels, parsed_args.justification)]
-            self.terminated = True
-            self.scratchpad += "===== Answer ==========\n"
-            self.scratchpad += str(self.answer)
-            logger.info("Got valid response, terminating.")
-        except pydantic.ValidationError:
-            logger.warning(f"Response didn't pass pydantic validation, retrying.")
-            # HACK: the default message from pydantic would be pretty long and lead to context length issues
-            # so I'm making my own
-            invalid_labels = [val for val in labels if val not in self.labels]
-            return f"Pydantic validation of function call failed because you passed the following invalid label(s): {invalid_labels}. Please retry using ONLY the labels allowed."
