@@ -18,7 +18,7 @@ class StopOnStep(_StoppingCondition):
         else:
             return None
 
-class StopOnBaseModel(_StoppingCondition):
+class StopOnDataModel(_StoppingCondition):
     """
     A stopping condition that checks whether the final tool call was an instance of the provided class.
 

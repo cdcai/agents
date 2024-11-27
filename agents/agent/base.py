@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from azure.identity import ClientSecretCredential
 from openai.types.chat.chat_completion import ChatCompletionMessage
 from ..abstract import _Agent
-from ..stopping_conditions import StopOnBaseModel
+from ..stopping_conditions import StopOnDataModel
 from ..decorators import response_model_handler
 
 logger = logging.getLogger(__name__)
@@ -356,7 +356,7 @@ class StructuredOutputAgent(Agent):
         self.output_len = len(self.response_model.model_fields)
         
         if stopping_condition is None:
-            stopping_condition = StopOnBaseModel(response_model)
+            stopping_condition = StopOnDataModel(response_model)
         else:
             logger.warning("StructuredOutputAgent assumes a `StopOnBaseModel` stopping condition, but you passed another at runtime which will take precedence. This may lead to errors.")
 
