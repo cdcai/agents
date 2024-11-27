@@ -16,7 +16,7 @@ def response_model_handler(func: Optional[type[pydantic.BaseModel]], /, *, expec
         return partial(response_model_handler, expected_len=expected_len)
 
     @wraps(func)
-    def inner_wrapper(*args, **kwargs) -> Union[type[pydantic.BaseModel], str]:
+    def inner_wrapper(*args, **kwargs) -> Union[pydantic.BaseModel, str]:
 
         try:
             parsed = func(*args, **kwargs)

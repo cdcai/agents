@@ -181,6 +181,14 @@ class Agent(_Agent):
         self.curr_step += 1
 
     @staticmethod
+    def clean_response(res: str) -> str:
+        """
+        Simple helper function to clean response text, if desired
+        """
+        out = res.strip('\n').strip().replace('\n', '')
+        return out
+
+    @staticmethod
     def authenticate():
         """
         Authenticate against Azure OpenAI using Service Principal
@@ -258,7 +266,7 @@ class Agent(_Agent):
                     out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
 
                     # Log it
-                    toolcall_str = f"{tool.function.name}({str(tool.function.arguments)[:50] + '...(trunc)' if len(str(tool.function.arguments)) > 50 else str(tool.funcion.arguments)})"
+                    toolcall_str = f"{tool.function.name}({str(tool.function.arguments)[:50] + '...(trunc)' if len(str(tool.function.arguments)) > 50 else str(tool.function.arguments)})"
                     logger.info(f"Got toolcall: {toolcall_str}")
                     self.scratchpad += f"\t=> {toolcall_str}\n"
         
@@ -271,12 +279,19 @@ class Agent(_Agent):
             logger.warning("Message returned truncated.")
         return out
 
-    def format_prompt(self, **kwargs) -> str:
+    def format_prompt(self) -> str:
         """
         Method which formats the BASE_PROMPT string, possibly inserting additional content.
         This is usually called within get_next_message() to populate the first user message.
         """
-        return re.sub("\s+", " ", self.BASE_PROMPT).format(**self.fmt_kwargs)
+        if len(self.BASE_PROMPT) == 0:
+            raise ValueError("You initialized an Agent with not BASE_PROMPT, please define this attribute with your prompt, optionally adding any formatting args in brackets.")
+        try:
+            out = self.BASE_PROMPT.format(**self.fmt_kwargs)
+        except KeyError as err:
+            raise KeyError(f"The following format kwargs were not passed at init time to format the BASE_PROMPT: {err}.")
+
+        return out
 
     def get_next_messages(self) -> list[dict[str, str]]:
         """

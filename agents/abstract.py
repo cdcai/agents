@@ -44,7 +44,7 @@ class _Agent(metaclass=abc.ABCMeta):
         llm: Optional[openai.AsyncOpenAI] = None,
         tools: Optional[List[dict]] = None,
         callbacks: Optional[List[Callable]] = None,
-        oai_kwargs: Optional[dict[str, any]] = None,
+        oai_kwargs: Optional[dict[str, Any]] = None,
         **fmt_kwargs
     ):
         pass
@@ -72,7 +72,7 @@ class _Agent(metaclass=abc.ABCMeta):
         """
 
     @abc.abstractmethod
-    def format_prompt(self, **kwargs) -> str:
+    def format_prompt(self) -> str:
         """
         Method which formats the BASE_PROMPT string, possibly inserting additional content.
         This is usually called within get_next_message() to populate the first user message.
@@ -98,11 +98,6 @@ class _Agent(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def dump(self, outfile: Union[str, os.PathLike]) -> None:
         raise NotImplementedError()
-
-    @staticmethod
-    def clean_response(res: str) -> str:
-        out = res.strip('\n').strip().replace('\n', '')
-        return out
 
     @staticmethod
     @abc.abstractmethod
