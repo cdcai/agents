@@ -2,13 +2,14 @@ import asyncio
 import logging
 from abc import ABCMeta, abstractmethod
 from itertools import islice
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Tuple, Any, Sequence
 
 import openai
 import polars as pl
 from tqdm import tqdm
 
 from .agent import Agent
+from .abstract import _Agent
 from .generic import openai_creds_ad
 
 logger = logging.getLogger(__name__)
@@ -19,13 +20,13 @@ class _BatchProcessor(metaclass=ABCMeta):
     A virtual class for a processor that maps over a large iterable
     where 1 output is expected for every 1 input
     """
-    def __init__(self, data: Iterable, agent_class: Agent, batch_size: int = 5, n_workers : int = 1, n_retry : int = 5, interactive : bool = False, **kwargs):
+    def __init__(self, data: Iterable, agent_class: type[Agent], batch_size: int = 5, n_workers : int = 1, n_retry : int = 5, interactive : bool = False, **kwargs):
         """
         A Processor which operates on chunks of an Iterable.
         Each chunk must be independent, as state will not be maintained between agent calls.
         
         :param Iterable data: An object which will be split into chunks of `batch_size` and passed as-is to `agent_class`
-        :param Agent agent_class: An uninitialized class which will be used to process the chunks of `data` (which it takes as it's first argument)
+        :param Agent agent_class: An uninitialized class which will be used to process the batches of `data` (which it takes as a named argument, `batch`, for formatting)
         :param int batch_size: Number of rows per batch of `data`
         :param int n_workers: Number of workers to use during processing. >1 will spawn parallel workers using concurrent.futures
         :param int n_retry: For each agent, how many round trips to try before giving up
@@ -39,12 +40,15 @@ class _BatchProcessor(metaclass=ABCMeta):
         self.n_retry = n_retry
         self.agent_kwargs = kwargs
         self.interactive = interactive
+
         openai_creds_ad("Interactive" if self.interactive else "ClientSecret")
         self.llm = openai.AsyncAzureOpenAI()
         
         # Parallel queues
-        self.in_q = asyncio.PriorityQueue()
-        self.out_q = asyncio.PriorityQueue()
+        #                                idx, retries remaining, batch
+        self.in_q : asyncio.PriorityQueue[Tuple[int, int, Any]] = asyncio.PriorityQueue()
+        #                                        idx, response
+        self.out_q : asyncio.PriorityQueue[Tuple[int, Any]] = asyncio.PriorityQueue()
 
     def _load_inqueue(self):
         """
@@ -75,7 +79,7 @@ class _BatchProcessor(metaclass=ABCMeta):
         raise NotImplementedError()
 
     @abstractmethod
-    def _placeholder(self, batch: Iterable) -> Iterable:
+    def _placeholder(self, batch: Any) -> Any:
         """
         Abstract method which should return an appropriately sized placholder data piece
         that will be inserted in place of a real prediction if we encounter an error
@@ -121,7 +125,7 @@ class _BatchProcessor(metaclass=ABCMeta):
 
         return out
 
-    async def _worker(self, worker_name: str, in_q: asyncio.Queue, out_q: asyncio.Queue):
+    async def _worker(self, worker_name: str, in_q: asyncio.PriorityQueue, out_q: asyncio.PriorityQueue):
         """
         Agent worker
         """
@@ -130,7 +134,7 @@ class _BatchProcessor(metaclass=ABCMeta):
                 (id, retry_left, data) = await in_q.get()
                 errored = False
                 agent = self._spawn_agent(data)
-                answer = await agent(steps=self.n_retry)
+                answer = await agent()
 
                 if len(answer) == 0:
                     logger.error(f"[_worker - {worker_name}]: No answer was provided for query {id}")
@@ -162,9 +166,16 @@ class _BatchProcessor(metaclass=ABCMeta):
             self.pbar.update()
             in_q.task_done()
 
+    @staticmethod
+    def _batch_format(batch: Any) -> str:
+        """
+        An optional formatter to convert batch into a str
+        """
+        return str(batch)
 
     def _spawn_agent(self, batch: Iterable) -> Agent:
-        out = self.agent_class(batch, llm=self.llm, **self.agent_kwargs)
+        batch_str = self._batch_format(batch)
+        out = self.agent_class(llm=self.llm, **self.agent_kwargs, batch=batch_str) # type: ignore[misc]
         return out
 
 class BatchProcessor(_BatchProcessor):
@@ -183,7 +194,7 @@ class BatchProcessor(_BatchProcessor):
         while batch := tuple(islice(iterator, self.batch_size)):
             yield batch
 
-    def _placeholder(self, batch: Iterable):
+    def _placeholder(self, batch: Sequence):
         """
         Returns a `List[str]` with `len() == len(batch)`
         """
@@ -197,13 +208,15 @@ class DFBatchProcessor(_BatchProcessor):
 
     The main user-facing method after init is :func:`process()`
     """
-    def __init__(self, data: pl.DataFrame, agent_class: Agent, batch_size: int = 5, n_workers : int = 1, n_retry : int = 5, interactive : bool = False, **kwargs):
+    data : pl.DataFrame
+
+    def __init__(self, data: pl.DataFrame, agent_class: type[Agent], batch_size: int = 5, n_workers : int = 1, n_retry : int = 5, interactive : bool = False, **kwargs):
         """
         A Processor which operates on chunks of a polars dataframe.
         Each chunk must be independent, as state will not be maintained between agent calls.
         
         :param pl.DataFrame data: A Data Frame object which will be split by `batch_size` rows and passed as-is to `agent_class`
-        :param Agent agent_class: An uninitialized class which will be used to process the chunks of `data` (which it takes as it's first argument)
+        :param Agent agent_class: An uninitialized class which will be used to process the chunks of `data`
         :param int batch_size: Number of rows per batch of `data`
         :param int n_workers: Number of workers to use during processing. >1 will spawn parallel workers using concurrent.futures
         :param int n_retry: For each agent, how many round trips to try before giving up
@@ -221,3 +234,10 @@ class DFBatchProcessor(_BatchProcessor):
         """
         resp_obj = "" if self.agent_class.output_len == 1 else ("", ) * self.agent_class.output_len
         return [resp_obj] * batch.height
+    
+    @staticmethod
+    def _batch_format(batch: pl.DataFrame) -> str:
+        """
+        Write out batch argument as ndJSON formatted str to insert into BASE_PROMPT
+        """
+        return batch.write_ndjson()
