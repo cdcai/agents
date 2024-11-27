@@ -1,22 +1,19 @@
-import asyncio
 import json
 import logging
 import os
 import re
-import subprocess
-import sys
-import tempfile
-from typing import Callable, Literal, Optional, Union, List
 from copy import deepcopy
+from typing import Any, Callable, Optional
 
 import backoff
 import openai
-from pydantic import BaseModel
 from azure.identity import ClientSecretCredential
 from openai.types.chat.chat_completion import ChatCompletionMessage
+from pydantic import BaseModel
+
 from ..abstract import _Agent
-from ..stopping_conditions import StopOnDataModel
 from ..decorators import response_model_handler
+from ..stopping_conditions import StopOnDataModel
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +46,7 @@ class Agent(_Agent):
     Each callback will have access to class object, scratchpad, and final answer, thus the signature must match.
     This is still quite experimental, but the intended usecase is for reflection / refinement applications.
     """
+
     def __init__(self, model_name, stopping_condition, llm = None, tools = None, callbacks = None, oai_kwargs = None, **fmt_kwargs):
         """
         Base Agent class
@@ -174,6 +172,10 @@ class Agent(_Agent):
         # Conditionally end run and assign answer
         self._check_stop_condition(response)
 
+        if self.terminated:
+            self.scratchpad += "===== Answer ============\n"
+            self.scratchpad += str(self.answer)
+
         # End Step
         self.scratchpad += "==============================\n\n"
         self.curr_step += 1
@@ -182,6 +184,8 @@ class Agent(_Agent):
     def authenticate():
         """
         Authenticate against Azure OpenAI using Service Principal
+        
+        HACK: Obviously this assumes we use AzureOpenAI, so we could modularize this
         """
         # === Service Principal auth ========================
         credential = ClientSecretCredential(
@@ -254,7 +258,7 @@ class Agent(_Agent):
                     out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
 
                     # Log it
-                    toolcall_str = f"{tool.function.name}({str(tool.function.arguments)[:30] + '...(trunc)' if len(str(tool.function.arguments)) > 30 else str(tool.funcion.arguments)})"
+                    toolcall_str = f"{tool.function.name}({str(tool.function.arguments)[:50] + '...(trunc)' if len(str(tool.function.arguments)) > 50 else str(tool.funcion.arguments)})"
                     logger.info(f"Got toolcall: {toolcall_str}")
                     self.scratchpad += f"\t=> {toolcall_str}\n"
         
@@ -349,9 +353,26 @@ class StructuredOutputAgent(Agent):
 
     A class method is constructed at runtime along with a stopping condition which triggers when a `response_model` object is detected in the response.
     """
-    answer: dict[str, any]
+    answer: dict[str, Any]
 
-    def __init__(self, response_model: BaseModel, model_name, stopping_condition=None, llm=None, tools=None, callbacks=None, oai_kwargs=None, **fmt_kwargs):
+    def __init__(self, response_model: type[BaseModel], model_name: str, expected_len: Optional[int] = None, stopping_condition=None, llm=None, tools=None, callbacks=None, oai_kwargs=None, **fmt_kwargs):
+        """
+        Language Agent with structured output
+
+        Handles creating a class method that is used to validate the tool call in the response body at runtime.
+        Also constructs it's own stopping condition which triggers when a `response_model` object is detected in the response (and is parsed correctly).
+
+        :param BaseModel response_model: A data model to use for structured output
+        :param str model_name: Name of OpenAI model to use (or deployment name for AzureOpenAI)
+        :param int expected_len: Optional length constraint on the response_model (OpenAI API doesn't allow maxItems parameter in schema so this is checked post-hoc)
+        :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task
+        :param AsyncOpenAI llm: Instantiated OpenAI instance to use (optional)
+        :param List[dict] tools: List of tools the agent can call via response (optional)
+        :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
+        :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
+        :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
+        
+        """
         self.response_model = response_model
         self.output_len = len(self.response_model.model_fields)
         
@@ -373,83 +394,14 @@ class StructuredOutputAgent(Agent):
 
         super().__init__(model_name, stopping_condition, llm, tools, callbacks, oai_kwargs, **fmt_kwargs)
     
-
-class MultiStepToolAgent(Agent):
-    """
-    An agent which expects multiple round-trips to complete task before finally calling a :func:`call_submit()` function to finish
-    """
-
-    TOOLS : list[dict]
-    # Will always be added to TOOLS
-    # (required to finalize)
-    submit_tool : dict = {
-        # Submit (final response)
-            "type": "function",
-            "function": {
-                "name": "call_submit",
-                "description": "Submit the final response back to user",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "input": {
-                            "type": "string",
-                            "description": "Final response to user"
-                        }
-                    },
-                    "required": ["input"]
-                }
-            }
-        }
-
-    # Payload to send back in subsequent steps
-    tool_res_payload : list[dict]
-
-    def __init__(self, model_name: str, llm: openai.AsyncOpenAI | None = None, tools: Optional[Union[dict, list[dict]]] = None, submit_tool: bool = True, oai_kwargs: Optional[dict[str, any]] = None, **fmt_kwargs):
-        
-        if tools is None and submit_tool:
-            tools = [self.submit_tool]
-        elif submit_tool:
-            tools.append(submit_tool)
-
-        super().__init__(model_name, llm, tools=tools, oai_kwargs=oai_kwargs, **fmt_kwargs)
-
-    def call_submit(self, input: str, clean: bool = False) -> None:
+    def reset(self) -> None:
         """
-        Final response call, which terminates further processing
+        Reset agent state for a re-run
         """
-        out_msg = self.clean_response(input) if clean else input
-        logger.info(f"Received final response: {out_msg}")
-        self.scratchpad += "===== Answer ==========\n"
-        self.scratchpad += out_msg
-        self.answer = out_msg
-        self.terminated = True
-    
-    @staticmethod
-    def _subprocess_tool_call_on_file(tool_input: str, cmd_args: list[str], output_type: Literal["stdout", "file"] = "stdout") -> str:
-        """
-        A helper function that writes `tool_input` to a file and runs a python module on that file, either returning stdout+stderr or the contents of the file after the subprocess call.
-
-        :param tool_input (str): A string to pass as input to the tool (this is likely code)
-        :param cmd_args (list[str]): Command-line args between the python -m call and the file name (should include the python module to call and any additional arguments)
-        :param output_type (str): The output to return (either stdout+error, or contents of the tempfile, if this is modified)
-        
-        :return: Either stdout and stderr concatenated into a string and separated by a newline, or `tool_input` after calling the python module
-        """
-        with tempfile.TemporaryFile("w", delete=False) as file:
-            file.write(tool_input)
-            file.close()
-
-            # Run mypy in a subprocess and capture stderr and stdout
-            out = subprocess.run(
-                [sys.executable, "-m", *cmd_args, file.name],
-                capture_output=True
-            )
-            if output_type == "stdout":
-                return "\n".join([out.stdout.decode("utf-8"), out.stderr.decode("utf-8")])
-            elif output_type == "file":
-                with open(file.name, "r") as f:
-                    out = f.read()
-                    return(out)
-            else:
-                # Shouldn't be reachable
-                raise NotImplementedError()
+        self.scratchpad = ""
+        self.answer = {}
+        self.tool_res_payload = []
+        self.callback_output = []
+        self.curr_step = 1
+        self.truncated = False
+        self.terminated = False
