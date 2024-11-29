@@ -4,62 +4,78 @@ Sean Browning (oet5)
 """
 
 import logging
-from typing import List, Literal, Optional
+from typing import Callable, List, Literal, Optional, Any
 
 import openai
 import polars as pl
 import pydantic
 
-from .base import Agent
+from ..abstract import _StoppingCondition
+from .base import Agent, StructuredOutputAgent
 
 logger = logging.getLogger(__name__)
 
 
-class PredictionAgent(Agent):
+class PredictionAgent(StructuredOutputAgent):
     """
     A language agent which returns a structured prediction given a polars DataFrame input.
     
-    The result from the agent should be a `list[str]` of `len(df.height)`
+    The result from the agent should be a `dict[str, list]` with one element, "labels", of `len(df.height)`
     """
-
-    answer: list[str]
 
     def __init__(
         self,
         df: pl.DataFrame,
-        model_name: str,
         labels: list[str],
-        llm: openai.AsyncOpenAI | None = None,
-        **oai_kwargs,
+        model_name: str,
+        stopping_condition: Optional[_StoppingCondition] = None,
+        llm: Optional[openai.AsyncOpenAI] = None,
+        tools: Optional[List[dict]] = None,
+        callbacks: Optional[List[Callable]] = None,
+        oai_kwargs: Optional[dict[str, Any]] = None,
+        **fmt_kwargs
     ):
         """
         An Agent where the output is a prediction for each row of `df` from one of the choices in `labels`
-        :param df: The data to classify
-        :param model_name: The Azure OpenAI model name to use
+        
+        
+        :param df: The data to classify (the ndJSON format of this will be available as `df` to format the BASE_PROMPT)
         :param labels: The set of categorical labels the model can choose from
-        :param llm: (optional) An OpenAI instance, otherwise one will be created via ClientSecret credentials internally
-        :param oai_kwargs: Additional key word args to pass to the OpenAI Chat Completion API (temperature, top_k, etc.)
+        :param str model_name: Name of OpenAI model to use (or deployment name for AzureOpenAI)
+        :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task (optional)
+        :param AsyncOpenAI llm: Instantiated OpenAI instance to use (optional)
+        :param List[dict] tools: List of tools the agent can call via response (optional)
+        :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
+        :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
+        :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
         """
         self.labels = labels
         self.expected_n = df.height
-        self._build_pydantic_model()
+        response_model = self._build_pydantic_model()
+
         super().__init__(
-            question=df.write_ndjson(),
+            response_model,
             model_name=model_name,
+            expected_len=self.expected_n,
+            stopping_condition=stopping_condition,
             llm=llm,
-            tools=self.response_tool,
-            tool_choice = "required", # Require a tool call
-            **oai_kwargs
+            tools=tools,
+            callbacks=callbacks,
+            oai_kwargs=oai_kwargs,
+            df=df.write_ndjson(),
+            **fmt_kwargs
         )
 
-    def _build_pydantic_model(self):
+    def _build_pydantic_model(self) -> type[pydantic.BaseModel]:
         """
         Construct a pydantic model that we'll use to force the LLM to return a structured response
         """
 
-        self.response_model = pydantic.create_model(
+        response_model = pydantic.create_model(
             "classify",
             labels=(
+                # HACK: This is a bodge to build a model with labels only known at runtime
+                # but it will fail static typing in doing so
                 List[Literal[tuple(self.labels)]],
                 pydantic.Field(
                     alias="labels",
@@ -68,58 +84,8 @@ class PredictionAgent(Agent):
             ),
         )
 
-        self.response_tool = openai.pydantic_function_tool(
-            self.response_model,
-            name="classify",
-            description="Classify the data using one of the possible categories",
-        )
+        return response_model
 
-    def classify(self, labels: list[str]) -> Optional[str]:
-        """
-        Function to "classify" ADE, which inspects that the LLM provided a response of the correct length and used only the labels provided
-        """
-        if len(labels) != self.expected_n:
-            logger.warning(f"Invalid return length: {len(labels)}, retrying.")
-            return f"Input was of length {self.expected_n} but you returned a response of length {len(labels)}. Please try again."
-
-        try:
-            # End our run if we make it through this
-            parsed_args = self.response_model(labels=labels)
-            self.answer = parsed_args.labels
-            self.terminated = True
-            self.scratchpad += "===== Answer ==========\n"
-            self.scratchpad += str(self.answer)
-            logger.info("Got valid response, terminating.")
-        except pydantic.ValidationError:
-            logger.warning(f"Response didn't pass pydantic validation, retrying.")
-            # HACK: the default message from pydantic would be pretty long and lead to context length issues
-            # so I'm making my own
-            invalid_labels = [val for val in labels if val not in self.labels]
-            return f"Pydantic validation of function call failed because you passed the following invalid label(s): {invalid_labels}. Please retry using ONLY the labels allowed."
-
-    def reset(self) -> None:
-        self.tool_res_payload = []
-        self.scratchpad = ""
-        self.answer = []
-        self.curr_step = 1
-        self.truncated = False
-        self.terminated = False
-
-    async def run(self, reset: bool = False, steps: Optional[int] = None) -> None:
-        """
-        Run the agent, optionally running only a fixed number of steps
-        """
-        if reset:
-            self.reset()
-
-        if steps is not None:
-            for _ in range(steps):
-                logger.debug(f"Running step {self.curr_step}.")
-                await self.step()
-                if self.is_terminated() or self.is_truncated():
-                    break
-        else:
-            await super().run(reset)
 
 class PredictionAgentWithJustification(PredictionAgent):
     """
@@ -127,7 +93,6 @@ class PredictionAgentWithJustification(PredictionAgent):
 
     The label and justification are supplied in the same tool call / response body rather than in separate messages to improve coherence.
     """
-    output_len: int = 2 # Each sample has two components: a label, and a justification
     def _build_pydantic_model(self):
         """
         Construct a pydantic model that we'll use to force the LLM to return a structured response.
@@ -157,29 +122,3 @@ class PredictionAgentWithJustification(PredictionAgent):
             name="classify",
             description="Classify the data using one of the possible categories and, for each classification, provide a short description of your reasoning.",
         )
-
-    def classify(self, labels: list[str], justification: list[str]) -> Optional[str]:
-        """
-        Function to "classify" ADE, which inspects that the LLM provided a response of the correct length and used only the labels provided
-        """
-        if len(labels) != self.expected_n:
-            logger.warning(f"Invalid return length: {len(labels)}, retrying.")
-            return f"Input was of length {self.expected_n} but you returned a response of length {len(labels)}. Please try again."
-
-        if len(justification) != len(labels):
-            logger.warning(f"Invalid justification length: {len(justification)} != {len(labels)}, retrying.")
-            return f"You should have provided one justification for each classification you provided ({len(labels)}), but I only recieved {len(justification)}. Please try again."
-        try:
-            # End our run if we make it through this
-            parsed_args = self.response_model(labels=labels, justification=justification)
-            self.answer = [(ans, just) for ans, just in zip(parsed_args.labels, parsed_args.justification)]
-            self.terminated = True
-            self.scratchpad += "===== Answer ==========\n"
-            self.scratchpad += str(self.answer)
-            logger.info("Got valid response, terminating.")
-        except pydantic.ValidationError:
-            logger.warning(f"Response didn't pass pydantic validation, retrying.")
-            # HACK: the default message from pydantic would be pretty long and lead to context length issues
-            # so I'm making my own
-            invalid_labels = [val for val in labels if val not in self.labels]
-            return f"Pydantic validation of function call failed because you passed the following invalid label(s): {invalid_labels}. Please retry using ONLY the labels allowed."
