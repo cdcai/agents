@@ -255,12 +255,12 @@ class Agent(_Agent):
         self.scratchpad += out.message.content if out.message.content else "<None>" + "\n"
 
         if len(self.TOOLS):
-            # Append GPT response to next payload
-            # NOTE: This has to come before the next step of parsing
-            self.tool_res_payload.append(deepcopy(out.message))
-
             # attempt to parse tool call arguments
             if out.finish_reason == "tool_calls":
+                # Append GPT response to next payload
+                # NOTE: This has to come before the next step of parsing
+                self.tool_res_payload.append(deepcopy(out.message))
+
                 self.scratchpad += "Tool calls: \n"
                 for i, tool in enumerate(out.message.tool_calls):
                     out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
