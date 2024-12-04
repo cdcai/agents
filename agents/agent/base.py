@@ -337,6 +337,18 @@ class Agent(_Agent):
                         "content": tool_result
                     }
                 )
+            except AttributeError as err:
+                known_functions = [tool["function"]["name"] for tool in self.TOOLS]
+                # Handle case where agent tried to access unknown function
+                self.tool_res_payload.append(
+                    {
+                        "tool_call_id": tool.id,
+                        "role": "tool",
+                        "content": f"You tried to call an unknown tool, you can only call these known tools: {known_functions}.\n{err}"
+                    }
+                )
+
+                logger.warning(f"Agent tried to call unknown tool: {tool.function.name}")
             except Exception as e:
                 logger.error(f"Tool call {tool.function.name} failed.")
                 raise e
