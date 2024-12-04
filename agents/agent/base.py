@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import re
-from copy import deepcopy
+from copy import deepcopy, copy
 from typing import Any, Callable, Optional
 
 import backoff
@@ -398,10 +398,13 @@ class StructuredOutputAgent(Agent):
 
         oai_tool = openai.pydantic_function_tool(response_model)
 
-        if tools is not None:
-            tools.append(oai_tool)
+        # Ensure we don't modify external tools
+        tools_internal = copy(tools)
+
+        if tools_internal is not None:
+            tools_internal.append(oai_tool)
         else:
-            tools = [oai_tool]
+            tools_internal = [oai_tool]
 
         # Assign a class method 
         fun_name = oai_tool["function"]["name"]
