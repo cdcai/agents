@@ -157,6 +157,21 @@ class Agent(_Agent):
                     )
                     n_retry -= 1
                     continue
+            except AssertionError as e:
+                # Agent tries to apply unknown function
+                if n_retry == 0:
+                    raise e
+                else:
+                    self.scratchpad += "Attempted to apply non-function, retrying.\n"
+                    logger.warning(f"Agent attempted to apply undefined function. {n_retry} retries remaining.")
+                    llm_prompt_input.append(
+                            {
+                                "role": "system",
+                                "content": f"You attempted to apply an undefined function, you may only use the following functions as tool calls: {self._known_tools}."
+                            }
+                    )
+                    n_retry -= 1
+                    continue
         if response is None:
             logger.warning("No response after 3 retries, Terminating!")
             self.truncated = True
@@ -337,18 +352,6 @@ class Agent(_Agent):
                         "content": tool_result
                     }
                 )
-            except AttributeError as err:
-                known_functions = [tool["function"]["name"] for tool in self.TOOLS]
-                # Handle case where agent tried to access unknown function
-                self.tool_res_payload.append(
-                    {
-                        "tool_call_id": tool.id,
-                        "role": "tool",
-                        "content": f"You tried to call an unknown tool ({tool.function.name}), you can only call these known tools: {known_functions}."
-                    }
-                )
-
-                logger.warning(f"Agent tried to call unknown tool: {tool.function.name}")
             except Exception as e:
                 logger.error(f"Tool call {tool.function.name} failed.")
                 raise e

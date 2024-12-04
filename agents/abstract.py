@@ -92,6 +92,10 @@ class _Agent(metaclass=abc.ABCMeta):
         return self.terminated
 
     @property
+    def _known_tools(self) -> list[str]:
+        return [tool["function"]["name"] for tool in self.TOOLS]
+
+    @property
     def is_truncated(self) -> bool:
         return self.truncated
 
