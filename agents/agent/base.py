@@ -344,7 +344,7 @@ class Agent(_Agent):
                     {
                         "tool_call_id": tool.id,
                         "role": "tool",
-                        "content": f"You tried to call an unknown tool, you can only call these known tools: {known_functions}.\n{err}"
+                        "content": f"You tried to call an unknown tool ({tool.function.name}), you can only call these known tools: {known_functions}."
                     }
                 )
 
