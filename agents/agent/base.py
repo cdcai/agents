@@ -278,6 +278,12 @@ class Agent(_Agent):
 
                 self.scratchpad += "Tool calls: \n"
                 for i, tool in enumerate(out.message.tool_calls):
+                    try:
+                        assert tool.function.name in self._known_tools
+                    except e:
+                        self.tool_res_payload.pop()
+                        raise e
+
                     out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
 
                     # Log it
