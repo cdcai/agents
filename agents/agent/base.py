@@ -280,7 +280,7 @@ class Agent(_Agent):
                 for i, tool in enumerate(out.message.tool_calls):
                     try:
                         assert tool.function.name in self._known_tools
-                    except e:
+                    except Exception as e:
                         self.tool_res_payload.pop()
                         raise e
 
