@@ -410,7 +410,7 @@ class StructuredOutputAgent(Agent):
         fun_name = oai_tool["function"]["name"]
         setattr(self, fun_name, response_model_handler(self.response_model))
 
-        super().__init__(model_name, stopping_condition, llm, tools, callbacks, oai_kwargs, **fmt_kwargs)
+        super().__init__(model_name, stopping_condition, llm, tools_internal, callbacks, oai_kwargs, **fmt_kwargs)
     
     def reset(self) -> None:
         """
