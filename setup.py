@@ -8,7 +8,7 @@ with open("README.md", encoding="utf-8") as readme_file:
 
 setup(
     name='agents',
-    version='0.3.0-alpha.1',
+    version='0.3.0',
     description='Yet another langchain-esque package to use language agents and compose agent-systems',
     long_description=readme,
     long_description_content_type="text/markdown",
