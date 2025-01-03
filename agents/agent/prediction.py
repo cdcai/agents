@@ -7,7 +7,6 @@ import logging
 from typing import Callable, List, Literal, Optional, Any
 
 import openai
-import polars as pl
 import pydantic
 
 from ..abstract import _StoppingCondition
@@ -18,16 +17,19 @@ logger = logging.getLogger(__name__)
 
 class PredictionAgent(StructuredOutputAgent):
     """
-    A language agent which returns a structured prediction given a polars DataFrame input.
+    A language agent which returns a structured prediction given a set of labels.
+
+    This is a subclass to StructuredOutputAgent, and is provided for convenience
+    when output is limited to a set of labels, thus the response model can be built on the fly.
     
     The result from the agent should be a `dict[str, list]` with one element, "labels", of `len(df.height)`
     """
 
     def __init__(
         self,
-        df: pl.DataFrame,
         labels: list[str],
         model_name: str,
+        expected_len: Optional[int] = None,
         stopping_condition: Optional[_StoppingCondition] = None,
         llm: Optional[openai.AsyncOpenAI] = None,
         tools: Optional[List[dict]] = None,
@@ -36,12 +38,12 @@ class PredictionAgent(StructuredOutputAgent):
         **fmt_kwargs
     ):
         """
-        An Agent where the output is a prediction for each row of `df` from one of the choices in `labels`
+        A language agent which returns a structured prediction given a set of choices in `labels`.
         
         
-        :param df: The data to classify (the ndJSON format of this will be available as `df` to format the BASE_PROMPT)
         :param labels: The set of categorical labels the model can choose from
         :param str model_name: Name of OpenAI model to use (or deployment name for AzureOpenAI)
+        :param int expected_len: Optional length constraint on the response_model (OpenAI API doesn't allow maxItems parameter in schema so this is checked post-hoc)
         :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task (optional)
         :param AsyncOpenAI llm: Instantiated OpenAI instance to use (optional)
         :param List[dict] tools: List of tools the agent can call via response (optional)
@@ -50,19 +52,17 @@ class PredictionAgent(StructuredOutputAgent):
         :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
         """
         self.labels = labels
-        self.expected_n = df.height
         response_model = self._build_pydantic_model()
 
         super().__init__(
             response_model,
             model_name=model_name,
-            expected_len=self.expected_n,
+            expected_len=expected_len,
             stopping_condition=stopping_condition,
             llm=llm,
             tools=tools,
             callbacks=callbacks,
             oai_kwargs=oai_kwargs,
-            df=df.write_ndjson(),
             **fmt_kwargs
         )
 
