@@ -391,7 +391,7 @@ class StructuredOutputAgent(Agent):
     """
     answer: dict[str, Any]
 
-    def __init__(self, response_model: type[BaseModel], model_name: str, expected_len: Optional[int] = None, stopping_condition=None, llm=None, tools=None, callbacks=None, oai_kwargs=None, **fmt_kwargs):
+    def __init__(self, response_model: type[BaseModel], model_name: str, stopping_condition=None, llm=None, tools=None, callbacks=None, oai_kwargs=None, **fmt_kwargs):
         """
         Language Agent with structured output
 
@@ -400,7 +400,6 @@ class StructuredOutputAgent(Agent):
 
         :param BaseModel response_model: A data model to use for structured output
         :param str model_name: Name of OpenAI model to use (or deployment name for AzureOpenAI)
-        :param int expected_len: Optional length constraint on the response_model (OpenAI API doesn't allow maxItems parameter in schema so this is checked post-hoc)
         :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task
         :param AsyncOpenAI llm: Instantiated OpenAI instance to use (optional)
         :param List[dict] tools: List of tools the agent can call via response (optional)

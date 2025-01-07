@@ -43,7 +43,7 @@ class PredictionAgent(StructuredOutputAgent):
         
         :param labels: The set of categorical labels the model can choose from
         :param str model_name: Name of OpenAI model to use (or deployment name for AzureOpenAI)
-        :param int expected_len: Optional length constraint on the response_model (OpenAI API doesn't allow maxItems parameter in schema so this is checked post-hoc)
+        :param int expected_len: Optional length constraint on the response_model (OpenAI API doesn't allow maxItems parameter in schema so this is checked post-hoc in the Pydantic BaseModel)
         :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task (optional)
         :param AsyncOpenAI llm: Instantiated OpenAI instance to use (optional)
         :param List[dict] tools: List of tools the agent can call via response (optional)
@@ -52,12 +52,11 @@ class PredictionAgent(StructuredOutputAgent):
         :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
         """
         self.labels = labels
-        response_model = self._build_pydantic_model()
+        response_model = self._build_pydantic_model(length_constraint=expected_len)
 
         super().__init__(
             response_model,
             model_name=model_name,
-            expected_len=expected_len,
             stopping_condition=stopping_condition,
             llm=llm,
             tools=tools,
@@ -66,25 +65,23 @@ class PredictionAgent(StructuredOutputAgent):
             **fmt_kwargs
         )
 
-    def _build_pydantic_model(self) -> type[pydantic.BaseModel]:
+    def _build_pydantic_model(self, length_constraint: Optional[int] = None) -> type[pydantic.BaseModel]:
         """
         Construct a pydantic model that we'll use to force the LLM to return a structured response
         """
+        class classify(pydantic.BaseModel):
+            labels: List[Literal[tuple(self.labels)]] = pydantic.Field(description="Classify the input data into one of the possible categories")
+            @pydantic.model_validator(mode="after")
+            def check_len(self):
+                """
+                Possibly check len
+                """
+                if length_constraint and len(self.labels) != length_constraint:
+                    raise ValueError(f"Expected labels to be of length {length_constraint} but got {len(self.labels)}")
+                
+                return self
 
-        response_model = pydantic.create_model(
-            "classify",
-            labels=(
-                # HACK: This is a bodge to build a model with labels only known at runtime
-                # but it will fail static typing in doing so
-                List[Literal[tuple(self.labels)]],
-                pydantic.Field(
-                    alias="labels",
-                    description="Classify the input data into one of the possible categories",
-                ),
-            ),
-        )
-
-        return response_model
+        return classify
 
 
 class PredictionAgentWithJustification(PredictionAgent):
@@ -92,33 +89,28 @@ class PredictionAgentWithJustification(PredictionAgent):
     A PredictionAgent which returns both a structured label output along with a short text justification for the prediction.
 
     The label and justification are supplied in the same tool call / response body rather than in separate messages to improve coherence.
+
+    This has the additional stipulation that the number of labels and justifications must agree in number, which is enforced by pydantic post-hoc.
     """
-    def _build_pydantic_model(self):
+    def _build_pydantic_model(self, length_constraint: Optional[int] = None):
         """
         Construct a pydantic model that we'll use to force the LLM to return a structured response.
         This will also include a justification for the classification.
         """
+        class classify(pydantic.BaseModel):
+            labels : List[Literal[tuple(self.labels)]] = pydantic.Field(description="Classify the input data into one of the possible categories")
+            justification : List[str] = pydantic.Field(description="SHORT description explaining your reasoning for the classfication")
+            @pydantic.model_validator(mode="after")
+            def check_len(self):
+                """
+                Check that justification and labels agree in length
+                (and optionally that they match length constraint, if passed)
+                """
+                if len(self.justification) != len(self.labels):
+                    raise ValueError(f"There should be a justfication for each label assigned, but the counts differed: (labels: {len(self.labels)}, justifications: {len(self.justification)})")
+                if length_constraint and len(self.justification) != length_constraint:
+                    raise ValueError(f"Expected exactly {length_constraint} labels and justifications, but got: (labels: {len(self.labels)}, justifications: {len(self.justification)})")
+                
+                return self
 
-        self.response_model = pydantic.create_model(
-            "classify",
-            labels=(
-                List[Literal[tuple(self.labels)]],
-                pydantic.Field(
-                    alias="labels",
-                    description="Classify the input data into one of the possible categories",
-                )
-            ),
-            justification=(
-                List[str],
-                pydantic.Field(
-                    alias="justification",
-                    description="SHORT description explaining your reasoning for the classfication"
-                )
-            )
-        )
-
-        self.response_tool = openai.pydantic_function_tool(
-            self.response_model,
-            name="classify",
-            description="Classify the data using one of the possible categories and, for each classification, provide a short description of your reasoning.",
-        )
+        return classify
