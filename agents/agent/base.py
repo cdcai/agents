@@ -224,12 +224,11 @@ class Agent(_Agent):
         os.environ["AZURE_OPENAI_ENDPOINT"] = os.environ["GPT4_URL"]
 
     @backoff.on_exception(backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3)
-    async def prompt_agent(self, prompt, n_tok = None, **addn_oai_kwargs):
+    async def prompt_agent(self, prompt, **addn_oai_kwargs):
         """
         An async version of the main OAI prompting logic.
 
         :param prompt: Either a dict or a list of dicts representing the message(s) to send to OAI model
-        :param n_tok: An optional maximum token length to request of the model response
         :param addn_oai_kwargs: Key word arguments passed to completions.create() call (tool calls, etc.)
 
         :return: An openAI Choice response object
@@ -246,7 +245,7 @@ class Agent(_Agent):
     
         try:
             res = await self.llm.chat.completions.create(
-                messages=prompt, model=self.model_name, max_tokens=n_tok,
+                messages=prompt, model=self.model_name,
                 **addn_oai_kwargs,
                 **self.oai_kwargs
             )
