@@ -11,6 +11,7 @@ from tqdm import tqdm
 from .agent import Agent
 from .abstract import _Agent
 from .generic import openai_creds_ad
+from .callbacks import AgentCallback
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ class _BatchProcessor(metaclass=ABCMeta):
         # Parallel queues
         #                                idx, retries remaining, batch
         self.in_q : asyncio.PriorityQueue[Tuple[int, int, Any]] = asyncio.PriorityQueue()
-        #                                        idx, response
+        #                                        idx, agent
         self.out_q : asyncio.PriorityQueue[Tuple[int, Any]] = asyncio.PriorityQueue()
 
     def _load_inqueue(self):
@@ -90,8 +91,11 @@ class _BatchProcessor(metaclass=ABCMeta):
         """
         Process all samples from input data using language agent, splitting by chunk size specified at init
         
+        Assign all agents called to the `agents` attribute for downstream use.
+
         :return Iterable: The predicted values after mapping over the input iterable (also stored in self.predicted)
         """
+        self.agents = []
         # Either the workers we called for at init or the number of batches we have to process
         # (whichever is fewer)
         self._load_inqueue()
@@ -118,13 +122,16 @@ class _BatchProcessor(metaclass=ABCMeta):
         if self.error_tasks > 0:
             logger.warning(f"[process] There were {self.error_tasks} unsucessful batches!")
         
-        # De-queue into list from output queue
+        # De-queue into list and save for possible downstream access
+        _, self.agents = self.dequeue(self.out_q)
+
         out = []
-        for _, msg in self.dequeue(self.out_q):
-            if isinstance(msg, list):
-                out.extend(msg)
+
+        for agent in self.agents:
+            if isinstance(agent.answer, list):
+                out.extend(agent.answer)
             else:
-                out.append(msg)
+                out.append(agent.answer)
 
         return out
 
@@ -137,9 +144,9 @@ class _BatchProcessor(metaclass=ABCMeta):
                 (id, retry_left, data) = await in_q.get()
                 errored = False
                 agent = self._spawn_agent(data)
-                answer = await agent()
+                await agent()
 
-                if len(answer) == 0:
+                if len(agent.answer) == 0:
                     logger.error(f"[_worker - {worker_name}]: No answer was provided for query {id}")
                     errored = True
 
@@ -156,7 +163,8 @@ class _BatchProcessor(metaclass=ABCMeta):
                 if retry_left < 0:
                     # End retries, fill in data with placeholder
                     logger.error(f"[_worker - {worker_name}]: Task {id} failed {self.n_retry} times and will not be retried")
-                    answer = self._placeholder(data)
+                    # BODGE: Not the best solution to alter this post-hoc. Fix
+                    agent.answer = self._placeholder(data)
                     self.error_tasks += 1
                 else:
                     # Send data back to queue to retry processing
@@ -165,7 +173,7 @@ class _BatchProcessor(metaclass=ABCMeta):
                     in_q.task_done()
                     continue
             
-            await out_q.put((id, answer))
+            await out_q.put((id, agent))
             self.pbar.update()
             in_q.task_done()
 
@@ -244,3 +252,52 @@ class DFBatchProcessor(_BatchProcessor):
         Write out batch argument as ndJSON formatted str to insert into BASE_PROMPT
         """
         return batch.write_ndjson()
+
+class DFBatchOptimizationProcessor(DFBatchProcessor):
+    """
+    A Batch processor that works over a DF of data, provides batch predictions and evaluates results with a `callback_class` on each batch
+
+    In addition to the standard `{answer}` and `{scratchpad}` formatting variables, callback_class recieves `{correct}`, which is the ground-truth value
+    present in the `label_col` of each batch.
+    
+    """
+    def __init__(self, data: pl.DataFrame, label_col: str, agent_class: type[Agent], callback_class, batch_size = 5, n_workers = 1, n_retry = 5, interactive = False, **kwargs):
+        self.label_col = label_col
+        self.callback_class = callback_class
+
+        super().__init__(data, agent_class, batch_size, n_workers, n_retry, interactive, **kwargs)
+
+    def _spawn_agent(self, batch: pl.DataFrame):
+        batch_str = self._batch_format(batch.drop(self.label_col))
+        out = self.agent_class(
+            llm=self.llm,
+            callbacks=[
+                AgentCallback(
+                    self.callback_class,
+                    llm=self.llm,
+                    correct=batch[self.label_col].to_list()
+                )
+            ],
+            **self.agent_kwargs,
+            batch=batch_str
+        )
+
+        return out
+
+    def process(self) -> dict[str, list]:
+        """
+        Process each batch, getting predictions and and feedback for each batch
+
+        ### Returns
+        A dict with two items:
+        - `output` (the agent.answer for each batch), and 
+        - `feedback` (the callback agent.answer on each batch)
+        """
+        output = super().process()
+
+        out = {
+            "output": output,
+            "feedback": [ag.callback_output[0] for ag in self.agents]
+        }
+
+        return out
