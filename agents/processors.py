@@ -2,7 +2,7 @@ import asyncio
 import logging
 from abc import ABCMeta, abstractmethod
 from itertools import islice
-from typing import Iterable, Iterator, Tuple, Any, Sequence
+from typing import Iterable, Iterator, Optional, Tuple, Any, Sequence
 
 import openai
 import polars as pl
@@ -261,9 +261,10 @@ class DFBatchOptimizationProcessor(DFBatchProcessor):
     present in the `label_col` of each batch.
     
     """
-    def __init__(self, data: pl.DataFrame, label_col: str, agent_class: type[Agent], callback_class, batch_size = 5, n_workers = 1, n_retry = 5, interactive = False, **kwargs):
+    def __init__(self, data: pl.DataFrame, label_col: str, agent_class: type[Agent], callback_class: type[Agent], batch_size = 5, n_workers = 1, n_retry = 5, interactive = False, callback_kwargs: Optional[dict] = None, **kwargs):
         self.label_col = label_col
         self.callback_class = callback_class
+        self.callback_kwargs = callback_kwargs if callback_kwargs else {}
 
         super().__init__(data, agent_class, batch_size, n_workers, n_retry, interactive, **kwargs)
 
@@ -275,6 +276,7 @@ class DFBatchOptimizationProcessor(DFBatchProcessor):
                 AgentCallback(
                     self.callback_class,
                     llm=self.llm,
+                    **self.callback_kwargs,
                     correct=batch[self.label_col].to_list()
                 )
             ],
