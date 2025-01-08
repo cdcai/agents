@@ -123,7 +123,7 @@ class _BatchProcessor(metaclass=ABCMeta):
             logger.warning(f"[process] There were {self.error_tasks} unsucessful batches!")
         
         # De-queue into list and save for possible downstream access
-        _, self.agents = self.dequeue(self.out_q)
+        self.agents = [agent for _, agent in self.dequeue(self.out_q)]
 
         out = []
 
