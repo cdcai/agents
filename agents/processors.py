@@ -286,7 +286,7 @@ class DFBatchOptimizationProcessor(DFBatchProcessor):
 
         return out
 
-    def process(self) -> dict[str, list]:
+    async def process(self):
         """
         Process each batch, getting predictions and and feedback for each batch
 
@@ -295,7 +295,7 @@ class DFBatchOptimizationProcessor(DFBatchProcessor):
         - `output` (the agent.answer for each batch), and 
         - `feedback` (the callback agent.answer on each batch)
         """
-        output = super().process()
+        output = await super().process()
 
         out = {
             "output": output,
