@@ -261,8 +261,9 @@ class DFBatchOptimizationProcessor(DFBatchProcessor):
     present in the `label_col` of each batch.
     
     """
-    def __init__(self, data: pl.DataFrame, label_col: str, agent_class: type[Agent], callback_class: type[Agent], batch_size = 5, n_workers = 1, n_retry = 5, interactive = False, callback_kwargs: Optional[dict] = None, **kwargs):
+    def __init__(self, data: pl.DataFrame, label_col: str, agent_class: type[PredictionAgent], callback_class: type[Agent], batch_size = 5, n_workers = 1, n_retry = 5, interactive = False, callback_kwargs: Optional[dict] = None, **kwargs):
         self.label_col = label_col
+        self.unique_labels = data[label_col].unique().to_list()
         self.callback_class = callback_class
         self.callback_kwargs = callback_kwargs if callback_kwargs else {}
 
@@ -271,6 +272,8 @@ class DFBatchOptimizationProcessor(DFBatchProcessor):
     def _spawn_agent(self, batch: pl.DataFrame):
         batch_str = self._batch_format(batch.drop(self.label_col))
         out = self.agent_class(
+            labels=self.unique_labels,
+            expected_len=batch.height,
             llm=self.llm,
             callbacks=[
                 AgentCallback(
