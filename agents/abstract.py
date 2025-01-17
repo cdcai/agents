@@ -4,12 +4,28 @@ All abstract classes
 import abc
 import logging
 import os
-from typing import Callable, List, Optional, Union, Any
+from typing import Callable, List, Optional, Union, Any, Type
 
 import openai
 from openai.types.chat.chat_completion import Choice, ChatCompletionMessage
 
 logger = logging.getLogger(__name__)
+
+class _Provider(metaclass=abc.ABCMeta):
+    """
+    A LLM Provider which should provide the standard methods for prompting and agent
+    authenticating, etc.
+    """
+    def __init__(self, model_name: str, **kwargs):
+        pass
+
+    @abc.abstractmethod
+    def authenticate(self):
+        pass
+
+    @abc.abstractmethod
+    async def prompt_agent(self, ag: Type['_Agent'], prompt: list[dict[str, str]], **kwargs):
+        pass
 
 class _StoppingCondition(metaclass=abc.ABCMeta):
     """
@@ -36,12 +52,13 @@ class _Agent(metaclass=abc.ABCMeta):
     CALLBACKS : list
     callback_output: list
     tool_res_payload: list[dict]
+    provider: _Provider
 
     def __init__(
         self,
-        model_name: str,
+        model_name: Optional[str],
         stopping_condition: _StoppingCondition,
-        llm: Optional[openai.AsyncOpenAI] = None,
+        provider: Optional[_Provider] = None,
         tools: Optional[List[dict]] = None,
         callbacks: Optional[List[Callable]] = None,
         oai_kwargs: Optional[dict[str, Any]] = None,
@@ -49,10 +66,6 @@ class _Agent(metaclass=abc.ABCMeta):
     ):
         pass
     
-    @abc.abstractmethod
-    async def prompt_agent(self, prompt: Union[dict[str, str], list[dict[str, str]]], n_tok: Optional[int] = None, **addn_oai_kwargs) -> Choice:
-        raise NotImplementedError()
-
     @abc.abstractmethod
     async def step(self):
         """
@@ -101,11 +114,6 @@ class _Agent(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def dump(self, outfile: Union[str, os.PathLike]) -> None:
-        raise NotImplementedError()
-
-    @staticmethod
-    @abc.abstractmethod
-    def authenticate() -> None:
         raise NotImplementedError()
 
     @abc.abstractmethod

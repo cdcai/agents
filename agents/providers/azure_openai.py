@@ -1,0 +1,129 @@
+import logging
+import os
+from dataclasses import dataclass, field
+from typing import List, Type
+
+import backoff
+import openai
+from azure.identity import ClientSecretCredential, InteractiveBrowserCredential
+from openai.types.chat.chat_completion import ChatCompletionMessage
+
+from ..abstract import _Agent, _Provider
+from ..generic import openai_creds_ad
+
+logger = logging.getLogger(__name__)
+
+class AzureOpenAIProvider(_Provider):
+    """
+    An Azure OpenAI Provider for language Agents.
+
+    This provider generally assumes you already have all required environment variables
+    set correctly, or will provide them as kwargs which will be passed to AsyncAzureOpenAI at init
+
+    Namely:
+    - api_version or OPENAI_API_VERSION
+    - azure_endpoint or AZURE_OPENAI_ENDPOINT
+
+    AZURE_OPENAI_API_KEY will be assigned via authentication (either by ClientSecret or Interactive AD Auth depending on `interactive`)
+    
+    :param str model_name: Model name from the deployments list to use
+    :param bool interactive: Should authentication use an Interactive AD Login (T), or ClientSecret (F)?
+    :param **kwargs: Any additional kw-args for AsyncAzureOpenAI
+    """
+    def __init__(self, model_name: str, interactive: bool, **kwargs):
+        self.model_name = model_name
+        self.interactive = interactive
+        self.authenticate()
+        self.llm = openai.AsyncAzureOpenAI(**kwargs)
+
+    def authenticate(self) -> None:
+        """
+        Retrieve Azure OpenAI API key via Interactive AD Login or ClientSecret authentication
+        (Interactive is not suggested for long-running tasks, since key expires every hour)
+
+        :returns: API key assigned to `AZURE_OPENAI_API_KEY` and `OPENAI_API_KEY` environ variables
+        """
+        if self.interactive:
+            credential = InteractiveBrowserCredential()
+        else:
+            credential = ClientSecretCredential(
+                tenant_id=os.environ["SP_TENANT_ID"],
+                client_id=os.environ["SP_CLIENT_ID"],
+                client_secret=os.environ["SP_CLIENT_SECRET"]
+            )
+
+        os.environ["AZURE_OPENAI_API_KEY"] = credential.get_token("https://cognitiveservices.azure.com/.default").token
+        os.environ["OPENAI_API_KEY"] = os.environ["AZURE_OPENAI_API_KEY"]
+        self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
+
+    @backoff.on_exception(backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3)
+    async def prompt_agent(self, ag: Type[_Agent], prompt: List[dict[str, str]], **kwargs):
+        """
+        An async version of the main OAI prompting logic.
+
+        :param ag: The calling agent class
+        :param prompt: Either a dict or a list of dicts representing the message(s) to send to OAI model
+        :param kwargs: Key word arguments passed to completions.create() call (tool calls, etc.)
+
+        :return: An openAI Choice response object
+        """
+
+        # Prompts should be passed as a list, so handle
+        # the case where we just passed a single dict
+        if isinstance(prompt, dict):
+            prompt = [prompt]
+
+        ag.scratchpad += f"--- Input ---------------------------\n"
+        ag.scratchpad += "\n".join(msg["content"] for msg in prompt if not isinstance(msg, ChatCompletionMessage))
+        ag.scratchpad += "\n-----------------------------------\n"
+    
+        try:
+            res = await self.llm.chat.completions.create(
+                messages=prompt, model=self.model_name,
+                **kwargs
+            )
+        except openai.AuthenticationError as e:
+            logger.info("Auth failed, attempting to re-authenticate before retrying")
+            self.authenticate()
+            raise e
+        except Exception as e:
+            # TODO: some error handling here
+            logger.debug(e)
+            raise e
+
+        out = res.choices[0]
+
+        ag.scratchpad += "--- Output --------------------------\n"
+        ag.scratchpad += "Message:\n"
+        ag.scratchpad += out.message.content if out.message.content else "<None>" + "\n"
+
+        if len(ag.TOOLS):
+            # attempt to parse tool call arguments
+            if out.finish_reason == "tool_calls":
+                # Append GPT response to next payload
+                # NOTE: This has to come before the next step of parsing
+                ag.tool_res_payload.append(deepcopy(out.message))
+
+                ag.scratchpad += "Tool calls: \n"
+                for i, tool in enumerate(out.message.tool_calls):
+                    try:
+                        assert tool.function.name in ag._known_tools
+                    except Exception as e:
+                        ag.tool_res_payload.pop()
+                        raise e
+
+                    out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
+
+                    # Log it
+                    toolcall_str = f"{tool.function.name}({str(tool.function.arguments)[:50] + '...(trunc)' if len(str(tool.function.arguments)) > 50 else str(tool.function.arguments)})"
+                    logger.info(f"Got toolcall: {toolcall_str}")
+                    ag.scratchpad += f"\t=> {toolcall_str}\n"
+        
+        ag.scratchpad += "\n-----------------------------------\n"
+        logger.info(f"Received response: {out.message.content}")
+
+        if out.finish_reason == "length":
+            ag.truncated = True
+            ag.scratchpad += "Response returned truncated from OpenAI due to token length.\n"
+            logger.warning("Message returned truncated.")
+        return out

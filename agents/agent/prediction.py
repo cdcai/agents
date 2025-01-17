@@ -4,13 +4,12 @@ Sean Browning (oet5)
 """
 
 import logging
-from typing import Callable, List, Literal, Optional, Any
+from typing import Callable, List, Literal, Optional, Any, Type
 
-import openai
 import pydantic
 
-from ..abstract import _StoppingCondition
-from .base import Agent, StructuredOutputAgent
+from ..abstract import _StoppingCondition, _Provider
+from .base import StructuredOutputAgent
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ class PredictionAgent(StructuredOutputAgent):
         model_name: str,
         expected_len: Optional[int] = None,
         stopping_condition: Optional[_StoppingCondition] = None,
-        llm: Optional[openai.AsyncOpenAI] = None,
+        provider: Optional[Type[_Provider]] = None,
         tools: Optional[List[dict]] = None,
         callbacks: Optional[List[Callable]] = None,
         oai_kwargs: Optional[dict[str, Any]] = None,
@@ -45,7 +44,7 @@ class PredictionAgent(StructuredOutputAgent):
         :param str model_name: Name of OpenAI model to use (or deployment name for AzureOpenAI)
         :param int expected_len: Optional length constraint on the response_model (OpenAI API doesn't allow maxItems parameter in schema so this is checked post-hoc in the Pydantic BaseModel)
         :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task (optional)
-        :param AsyncOpenAI llm: Instantiated OpenAI instance to use (optional)
+        :param Type[_Provider] provider: Instantiated OpenAI instance to use (optional)
         :param List[dict] tools: List of tools the agent can call via response (optional)
         :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
         :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
@@ -58,7 +57,7 @@ class PredictionAgent(StructuredOutputAgent):
             response_model,
             model_name=model_name,
             stopping_condition=stopping_condition,
-            llm=llm,
+            provider=provider,
             tools=tools,
             callbacks=callbacks,
             oai_kwargs=oai_kwargs,
