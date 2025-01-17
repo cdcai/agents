@@ -1,18 +1,14 @@
 import json
 import logging
-import os
-import re
-from copy import deepcopy, copy
+from copy import copy, deepcopy
 from typing import Any, Callable, Optional
 
-import backoff
 import openai
-from azure.identity import ClientSecretCredential
-from openai.types.chat.chat_completion import ChatCompletionMessage
 from pydantic import BaseModel
 
 from ..abstract import _Agent
 from ..decorators import response_model_handler
+from ..providers import AzureOpenAIProvider
 from ..stopping_conditions import StopOnDataModel
 
 logger = logging.getLogger(__name__)
@@ -47,13 +43,13 @@ class Agent(_Agent):
     This is still quite experimental, but the intended usecase is for reflection / refinement applications.
     """
 
-    def __init__(self, model_name, stopping_condition, llm = None, tools = None, callbacks = None, oai_kwargs = None, **fmt_kwargs):
+    def __init__(self, stopping_condition, model_name = None, provider = None, tools = None, callbacks = None, oai_kwargs = None, **fmt_kwargs):
         """
         Base Agent class
 
-        :param str model_name: Name of OpenAI model to use (or deployment name for AzureOpenAI)
         :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task
-        :param AsyncOpenAI llm: Instantiated OpenAI instance to use (optional)
+        :param str model_name: Name of model to use (or deployment name for AzureOpenAI) (optional if provider is passed)
+        :param Type[_Provider] provider: Instantiated OpenAI instance to use (optional)
         :param List[dict] tools: List of tools the agent can call via response (optional)
         :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
         :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
@@ -63,12 +59,10 @@ class Agent(_Agent):
         self.stopping_condition = stopping_condition
         # We default to Azure OpenAI here, but
         # we could also use something else as long as it follows the OpenAI API
-        if llm is None:
-            self.authenticate()
-            self.llm = openai.AsyncAzureOpenAI()
+        if provider is None:
+            self.provider = AzureOpenAIProvider(model_name=model_name)
         else:
-            self.llm = llm
-        self.model_name = model_name
+            self.provider = provider
         
         # Handle Tools
         self.TOOLS = getattr(self, "TOOLS", [])
@@ -142,7 +136,7 @@ class Agent(_Agent):
         n_retry = 3
         while response is None and n_retry > 0:
             try:
-                response = await self.prompt_agent(llm_prompt_input)
+                response = await self.provider.prompt_agent(self, llm_prompt_input, **self.oai_kwargs)
             except json.decoder.JSONDecodeError as e:
                 if n_retry == 0:
                     raise e
@@ -201,102 +195,6 @@ class Agent(_Agent):
         Simple helper function to clean response text, if desired
         """
         out = res.strip('\n').strip().replace('\n', '')
-        return out
-
-    @staticmethod
-    def authenticate():
-        """
-        Authenticate against Azure OpenAI using Service Principal
-        
-        HACK: Obviously this assumes we use AzureOpenAI, so we could modularize this
-        """
-        # === Service Principal auth ========================
-        credential = ClientSecretCredential(
-            tenant_id=os.environ["SP_TENANT_ID"],
-            client_id=os.environ["SP_CLIENT_ID"],
-            client_secret=os.environ["SP_CLIENT_SECRET"],
-        )
-
-        os.environ["AZURE_OPENAI_API_KEY"] = credential.get_token(
-            "https://cognitiveservices.azure.com/.default"
-        ).token
-
-        os.environ["AZURE_OPENAI_ENDPOINT"] = os.environ["GPT4_URL"]
-
-    @backoff.on_exception(backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3)
-    async def prompt_agent(self, prompt, **addn_oai_kwargs):
-        """
-        An async version of the main OAI prompting logic.
-
-        :param prompt: Either a dict or a list of dicts representing the message(s) to send to OAI model
-        :param addn_oai_kwargs: Key word arguments passed to completions.create() call (tool calls, etc.)
-
-        :return: An openAI Choice response object
-        """
-
-        # Prompts should be passed as a list, so handle
-        # the case where we just passed a single dict
-        if isinstance(prompt, dict):
-            prompt = [prompt]
-
-        self.scratchpad += f"--- Input ---------------------------\n"
-        self.scratchpad += "\n".join(msg["content"] for msg in prompt if not isinstance(msg, ChatCompletionMessage))
-        self.scratchpad += "\n-----------------------------------\n"
-    
-        try:
-            res = await self.llm.chat.completions.create(
-                messages=prompt, model=self.model_name,
-                **addn_oai_kwargs,
-                **self.oai_kwargs
-            )
-        except openai.AuthenticationError:
-            logger.info("Auth failed, attempting to re-authenticate before retrying")
-            # HACK: This isn't terrific, but it should work for
-            # our current use case (Azure OpenAI with service principal/User creds)
-            if isinstance(self.llm, openai.AzureOpenAI):
-                self.authenticate()
-                self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
-            raise e
-        except Exception as e:
-            # TODO: some error handling here
-            logger.debug(e)
-            raise e
-
-        out = res.choices[0]
-
-        self.scratchpad += "--- Output --------------------------\n"
-        self.scratchpad += "Message:\n"
-        self.scratchpad += out.message.content if out.message.content else "<None>" + "\n"
-
-        if len(self.TOOLS):
-            # attempt to parse tool call arguments
-            if out.finish_reason == "tool_calls":
-                # Append GPT response to next payload
-                # NOTE: This has to come before the next step of parsing
-                self.tool_res_payload.append(deepcopy(out.message))
-
-                self.scratchpad += "Tool calls: \n"
-                for i, tool in enumerate(out.message.tool_calls):
-                    try:
-                        assert tool.function.name in self._known_tools
-                    except Exception as e:
-                        self.tool_res_payload.pop()
-                        raise e
-
-                    out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
-
-                    # Log it
-                    toolcall_str = f"{tool.function.name}({str(tool.function.arguments)[:50] + '...(trunc)' if len(str(tool.function.arguments)) > 50 else str(tool.function.arguments)})"
-                    logger.info(f"Got toolcall: {toolcall_str}")
-                    self.scratchpad += f"\t=> {toolcall_str}\n"
-        
-        self.scratchpad += "\n-----------------------------------\n"
-        logger.info(f"Received response: {out.message.content}")
-
-        if out.finish_reason == "length":
-            self.truncated = True
-            self.scratchpad += "Response returned truncated from OpenAI due to token length.\n"
-            logger.warning("Message returned truncated.")
         return out
 
     def format_prompt(self) -> str:
@@ -390,7 +288,7 @@ class StructuredOutputAgent(Agent):
     """
     answer: dict[str, Any]
 
-    def __init__(self, response_model: type[BaseModel], model_name: str, stopping_condition=None, llm=None, tools=None, callbacks=None, oai_kwargs=None, **fmt_kwargs):
+    def __init__(self, response_model: type[BaseModel], model_name: Optional[str] = None, stopping_condition=None, provider=None, tools=None, callbacks=None, oai_kwargs=None, **fmt_kwargs):
         """
         Language Agent with structured output
 
@@ -398,9 +296,9 @@ class StructuredOutputAgent(Agent):
         Also constructs it's own stopping condition which triggers when a `response_model` object is detected in the response (and is parsed correctly).
 
         :param BaseModel response_model: A data model to use for structured output
-        :param str model_name: Name of OpenAI model to use (or deployment name for AzureOpenAI)
         :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task
-        :param AsyncOpenAI llm: Instantiated OpenAI instance to use (optional)
+        :param str model_name: Name of model to use (or deployment name for AzureOpenAI) (optional if provider is passed)
+        :param Type[_Provider] provider: Instantiated OpenAI instance to use (optional)
         :param List[dict] tools: List of tools the agent can call via response (optional)
         :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
         :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
@@ -429,7 +327,15 @@ class StructuredOutputAgent(Agent):
         fun_name = oai_tool["function"]["name"]
         setattr(self, fun_name, response_model_handler(self.response_model))
 
-        super().__init__(model_name, stopping_condition, llm, tools_internal, callbacks, oai_kwargs, **fmt_kwargs)
+        super().__init__(
+            stopping_condition=stopping_condition,
+            model_name=model_name,
+            provider=provider,
+            tools=tools_internal,
+            callbacks=callbacks,
+            oai_kwargs=oai_kwargs,
+            **fmt_kwargs
+        )
     
     def reset(self) -> None:
         """
