@@ -1,7 +1,8 @@
 import logging
 import os
-from dataclasses import dataclass, field
+from copy import deepcopy
 from typing import List, Type
+import json
 
 import backoff
 import openai
@@ -9,7 +10,6 @@ from azure.identity import ClientSecretCredential, InteractiveBrowserCredential
 from openai.types.chat.chat_completion import ChatCompletionMessage
 
 from ..abstract import _Agent, _Provider
-from ..generic import openai_creds_ad
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,6 @@ class AzureOpenAIProvider(_Provider):
 
         os.environ["AZURE_OPENAI_API_KEY"] = credential.get_token("https://cognitiveservices.azure.com/.default").token
         os.environ["OPENAI_API_KEY"] = os.environ["AZURE_OPENAI_API_KEY"]
-        self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
 
     @backoff.on_exception(backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3)
     async def prompt_agent(self, ag: Type[_Agent], prompt: List[dict[str, str]], **kwargs):
@@ -85,6 +84,7 @@ class AzureOpenAIProvider(_Provider):
         except openai.AuthenticationError as e:
             logger.info("Auth failed, attempting to re-authenticate before retrying")
             self.authenticate()
+            self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
             raise e
         except Exception as e:
             # TODO: some error handling here

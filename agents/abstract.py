@@ -56,8 +56,8 @@ class _Agent(metaclass=abc.ABCMeta):
 
     def __init__(
         self,
-        model_name: Optional[str],
         stopping_condition: _StoppingCondition,
+        model_name: Optional[str] = None,
         provider: Optional[_Provider] = None,
         tools: Optional[List[dict]] = None,
         callbacks: Optional[List[Callable]] = None,

@@ -1,7 +1,7 @@
 import json
 import logging
 from copy import copy, deepcopy
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import openai
 from pydantic import BaseModel
@@ -43,12 +43,12 @@ class Agent(_Agent):
     This is still quite experimental, but the intended usecase is for reflection / refinement applications.
     """
 
-    def __init__(self, model_name, stopping_condition, provider = None, tools = None, callbacks = None, oai_kwargs = None, **fmt_kwargs):
+    def __init__(self, stopping_condition, model_name = None, provider = None, tools = None, callbacks = None, oai_kwargs = None, **fmt_kwargs):
         """
         Base Agent class
 
-        :param str model_name: Name of model to use (or deployment name for AzureOpenAI)
         :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task
+        :param str model_name: Name of model to use (or deployment name for AzureOpenAI) (optional if provider is passed)
         :param Type[_Provider] provider: Instantiated OpenAI instance to use (optional)
         :param List[dict] tools: List of tools the agent can call via response (optional)
         :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
@@ -288,7 +288,7 @@ class StructuredOutputAgent(Agent):
     """
     answer: dict[str, Any]
 
-    def __init__(self, response_model: type[BaseModel], model_name: str, stopping_condition=None, provider=None, tools=None, callbacks=None, oai_kwargs=None, **fmt_kwargs):
+    def __init__(self, response_model: type[BaseModel], model_name: Optional[str] = None, stopping_condition=None, provider=None, tools=None, callbacks=None, oai_kwargs=None, **fmt_kwargs):
         """
         Language Agent with structured output
 
@@ -296,8 +296,8 @@ class StructuredOutputAgent(Agent):
         Also constructs it's own stopping condition which triggers when a `response_model` object is detected in the response (and is parsed correctly).
 
         :param BaseModel response_model: A data model to use for structured output
-        :param str model_name: Name of OpenAI model to use (or deployment name for AzureOpenAI)
         :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task
+        :param str model_name: Name of model to use (or deployment name for AzureOpenAI) (optional if provider is passed)
         :param Type[_Provider] provider: Instantiated OpenAI instance to use (optional)
         :param List[dict] tools: List of tools the agent can call via response (optional)
         :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
@@ -327,7 +327,15 @@ class StructuredOutputAgent(Agent):
         fun_name = oai_tool["function"]["name"]
         setattr(self, fun_name, response_model_handler(self.response_model))
 
-        super().__init__(model_name, stopping_condition, provider, tools_internal, callbacks, oai_kwargs, **fmt_kwargs)
+        super().__init__(
+            stopping_condition=stopping_condition,
+            model_name=model_name,
+            provider=provider,
+            tools=tools_internal,
+            callbacks=callbacks,
+            oai_kwargs=oai_kwargs,
+            **fmt_kwargs
+        )
     
     def reset(self) -> None:
         """

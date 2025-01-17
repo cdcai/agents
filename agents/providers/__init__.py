@@ -1,1 +1,1 @@
-from azure_openai import AzureOpenAIProvider
+from .azure_openai import AzureOpenAIProvider
