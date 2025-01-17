@@ -2,15 +2,14 @@ import asyncio
 import logging
 from abc import ABCMeta, abstractmethod
 from itertools import islice
-from typing import Iterable, Iterator, Tuple, Any, Sequence
+from typing import Any, Iterable, Iterator, Optional, Sequence, Tuple, Type
 
-import openai
 import polars as pl
 from tqdm import tqdm
 
+from .abstract import _Provider
 from .agent import Agent
-from .abstract import _Agent
-from .generic import openai_creds_ad
+from .providers import AzureOpenAIProvider
 
 logger = logging.getLogger(__name__)
 
@@ -20,17 +19,17 @@ class _BatchProcessor(metaclass=ABCMeta):
     A virtual class for a processor that maps over a large iterable
     where 1 output is expected for every 1 input
     """
-    def __init__(self, data: Iterable, agent_class: type[Agent], batch_size: int = 5, n_workers : int = 1, n_retry : int = 5, interactive : bool = False, **kwargs):
+    def __init__(self, data: Iterable, agent_class: type[Agent], provider: Optional[Type[_Provider]], batch_size: int = 5, n_workers : int = 1, n_retry : int = 5, **kwargs):
         """
         A Processor which operates on chunks of an Iterable.
         Each chunk must be independent, as state will not be maintained between agent calls.
         
         :param Iterable data: An object which will be split into chunks of `batch_size` and passed as-is to `agent_class`
         :param Agent agent_class: An uninitialized class which will be used to process the batches of `data` (which it takes as a named argument, `batch`, for formatting)
+        :param _Provider provider: Optionally, an initialized LLM provider to use with the processor
         :param int batch_size: Number of rows per batch of `data`
         :param int n_workers: Number of workers to use during processing. >1 will spawn parallel workers using concurrent.futures
         :param int n_retry: For each agent, how many round trips to try before giving up
-        :param bool interactive: Use interactive authentication (`True`) instead of ClientSecret authentication (not advised, for debugging)
         :param kwargs: Additional named arguments passed to `agent_class` on init
         """
         self.agent_class = agent_class
@@ -39,10 +38,15 @@ class _BatchProcessor(metaclass=ABCMeta):
         self.batch_size = batch_size
         self.n_retry = n_retry
         self.agent_kwargs = kwargs
-        self.interactive = interactive
 
-        openai_creds_ad("Interactive" if self.interactive else "ClientSecret")
-        self.llm = openai.AsyncAzureOpenAI()
+        if provider is not None:
+            self.provider = provider
+        else:
+            # Default to AzureOpenAI
+            try:
+                self.provider = AzureOpenAIProvider(model_name=kwargs["model_name"])
+            except KeyError:
+                raise RuntimeError("If `provider` is not passed, `model_name` must be passed to initialize one!")
         
         # Parallel queues
         #                                idx, retries remaining, batch
@@ -178,7 +182,7 @@ class _BatchProcessor(metaclass=ABCMeta):
 
     def _spawn_agent(self, batch: Iterable) -> Agent:
         batch_str = self._batch_format(batch)
-        out = self.agent_class(llm=self.llm, **self.agent_kwargs, batch=batch_str) # type: ignore[misc]
+        out = self.agent_class(provider=self.provider, **self.agent_kwargs, batch=batch_str) # type: ignore[misc]
         return out
 
 class BatchProcessor(_BatchProcessor):
@@ -212,21 +216,6 @@ class DFBatchProcessor(_BatchProcessor):
     The main user-facing method after init is :func:`process()`
     """
     data : pl.DataFrame
-
-    def __init__(self, data: pl.DataFrame, agent_class: type[Agent], batch_size: int = 5, n_workers : int = 1, n_retry : int = 5, interactive : bool = False, **kwargs):
-        """
-        A Processor which operates on chunks of a polars dataframe.
-        Each chunk must be independent, as state will not be maintained between agent calls.
-        
-        :param pl.DataFrame data: A Data Frame object which will be split by `batch_size` rows and passed as-is to `agent_class`
-        :param Agent agent_class: An uninitialized class which will be used to process the chunks of `data`
-        :param int batch_size: Number of rows per batch of `data`
-        :param int n_workers: Number of workers to use during processing. >1 will spawn parallel workers using concurrent.futures
-        :param int n_retry: For each agent, how many round trips to try before giving up
-        :param bool interactive: Use interactive authentication (`True`) instead of ClientSecret authentication (not advised, for debugging)
-        :param kwargs: Additional named arguments passed to `agent_class` on init
-        """
-        super().__init__(data, agent_class, batch_size, n_workers, n_retry, interactive, **kwargs)
 
     def _iter(self) -> Iterator[pl.DataFrame]:
         return self.data.iter_slices(self.batch_size)

@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 from typing import List, Literal
 import logging
 import dotenv
-import openai
 
 N_QUESTIONS = 20
 BATCH_SIZE = 5
@@ -74,14 +73,15 @@ class QAnswerer(agents.StructuredOutputAgent):
 
 if __name__ == "__main__":
     # Run this with Interactive OAuth
-    agents.openai_creds_ad("Interactive")
-
-    llm = openai.AsyncAzureOpenAI()
+    prov = agents.AzureOpenAIProvider(
+        # "gpt-4o-mini-nofilter",
+        "GPT35-Turbo-0613",
+        interactive=True
+    )
 
     ag = QAGenerator(
         response_model=QuestionandAnswer,
-        model_name = "edav-api-share-gpt4-api-nofilter",
-        llm = llm,
+        provider=prov,
         oai_kwargs={"temperature": 1.0},
         n_questions=N_QUESTIONS
     )
@@ -95,9 +95,9 @@ if __name__ == "__main__":
         data=ag.answer["question"],
         agent_class=QAnswerer,
         batch_size=BATCH_SIZE,
+        provider=prov,
         n_workers=3,
         response_model=Answer,
-        model_name = "edav-api-share-gpt4-api-nofilter",
         oai_kwargs={"temperature": 0.0}
     )
 

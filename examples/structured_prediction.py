@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field
 from typing import List, Literal
 import logging
 import dotenv
-import openai
 
 # NOTE: This loads in env vars for openAI
 dotenv.load_dotenv()
@@ -59,14 +58,14 @@ class QAnswerer(agents.StructuredOutputAgent):
 
 if __name__ == "__main__":
     # Run this with Interactive OAuth
-    agents.openai_creds_ad("Interactive")
-
-    llm = openai.AsyncAzureOpenAI()
+    prov = agents.AzureOpenAIProvider(
+        "gpt-4o-mini-nofilter",
+        interactive=True
+    )
 
     ag = QAGenerator(
         response_model=QuestionandAnswer,
-        model_name = "edav-api-share-gpt4-api-nofilter",
-        llm = llm,
+        provider = prov,
         oai_kwargs={"temperature": 1.0},
         n_questions=5
     )
@@ -77,8 +76,7 @@ if __name__ == "__main__":
 
     ag2 = QAnswerer(
         response_model=Answer,
-        model_name = "edav-api-share-gpt4-api-nofilter",
-        llm = llm,
+        provider = prov,
         oai_kwargs={"temperature": 1.0},
         questions=ag.answer["question"]
     )
