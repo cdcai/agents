@@ -4,10 +4,9 @@ from copy import copy, deepcopy
 from typing import Any, Callable, Optional
 
 import openai
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ..abstract import _Agent
-from ..decorators import response_model_handler
 from ..providers import AzureOpenAIProvider
 from ..stopping_conditions import StopOnDataModel
 
@@ -248,17 +247,23 @@ class Agent(_Agent):
                 self.scratchpad += f"\t=> {tool.function.name}()\n"
                 self.scratchpad += tool_result if type(tool_result) == str else repr(tool_result) + "\n\n"
 
-                self.tool_res_payload.append(
-                    {
-                        "tool_call_id": tool.id,
-                        "role": "tool",
-                        "content": tool_result
-                    }
-                )
+            except ValidationError as err:
+                # CASE: Tool call was a pydantic BaseModel and it failed validation
+                # We'd want to send error back to model to correct as opposed to raising
+                logger.warning(f"Response didn't pass pydantic validation.")
+                tool_result = str(err)
             except Exception as e:
+                # Else, raise and fail.
                 logger.error(f"Tool call {tool.function.name} failed.")
                 raise e
-
+                
+            self.tool_res_payload.append(
+                {
+                    "tool_call_id": tool.id,
+                    "role": "tool",
+                    "content": tool_result
+                }
+            )
             self.scratchpad += "---------------------------------\n\n"
 
     def reset(self) -> None:
@@ -325,7 +330,7 @@ class StructuredOutputAgent(Agent):
 
         # Assign a class method 
         fun_name = oai_tool["function"]["name"]
-        setattr(self, fun_name, response_model_handler(self.response_model))
+        setattr(self, fun_name, self.response_model)
 
         super().__init__(
             stopping_condition=stopping_condition,
