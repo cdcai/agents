@@ -44,7 +44,7 @@ class _BatchProcessor(metaclass=ABCMeta):
         else:
             # Default to AzureOpenAI
             try:
-                self.provider = AzureOpenAIProvider(model_name=kwargs["model_name"])
+                self.provider = AzureOpenAIProvider(model_name=kwargs["model_name"], interactive=True)
             except KeyError:
                 raise RuntimeError("If `provider` is not passed, `model_name` must be passed to initialize one!")
         
