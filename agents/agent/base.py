@@ -292,6 +292,7 @@ class StructuredOutputAgent(Agent):
     A class method is constructed at runtime along with a stopping condition which triggers when a `response_model` object is detected in the response.
     """
     answer: dict[str, Any]
+    _response_model_warn : bool = True
 
     def __init__(self, response_model: type[BaseModel], model_name: Optional[str] = None, stopping_condition=None, provider=None, tools=None, callbacks=None, oai_kwargs=None, **fmt_kwargs):
         """
@@ -315,8 +316,11 @@ class StructuredOutputAgent(Agent):
         
         if stopping_condition is None:
             stopping_condition = StopOnDataModel(response_model)
+        elif stopping_condition is not None and self._response_model_warn:
+            logger.warning("StructuredOutputAgent assumes a `StopOnBaseModel` stopping condition, but you passed another at runtime which will take precedence. This may lead to errors. This warning will only be displayed once per session.")
+            StructuredOutputAgent._response_model_warn = False # Once per session
         else:
-            logger.warning("StructuredOutputAgent assumes a `StopOnBaseModel` stopping condition, but you passed another at runtime which will take precedence. This may lead to errors.")
+            pass
 
         oai_tool = openai.pydantic_function_tool(response_model)
 
