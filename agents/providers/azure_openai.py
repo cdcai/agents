@@ -1,7 +1,7 @@
 import logging
 import os
 from copy import deepcopy
-from typing import List, Type
+from typing import List, Type, Union
 import json
 
 import backoff
@@ -43,6 +43,8 @@ class AzureOpenAIProvider(_Provider):
 
         :returns: API key assigned to `AZURE_OPENAI_API_KEY` and `OPENAI_API_KEY` environ variables
         """
+        credential: Union[InteractiveBrowserCredential, ClientSecretCredential]
+        
         if self.interactive:
             credential = InteractiveBrowserCredential()
         else:
