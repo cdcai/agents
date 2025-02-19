@@ -26,11 +26,11 @@ if __name__ == "__main__":
         stopping_condition=agents.StopOnStep(1),
         provider=prov,
         context = "",
-        statement_a = "The king of france is bald.",
+        statement_a = "The king of France is bald.",
         statement_b = "France has a king."
     )
 
-    with agents.ssl_tools.no_ssl_verification():
-        asyncio.run(agent())
+    asyncio.run(agent())
 
-    print(agent.answer)
+    print(agent.scratchpad)
+    print(agent.log_probs)
