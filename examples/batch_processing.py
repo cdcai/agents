@@ -79,6 +79,12 @@ if __name__ == "__main__":
         interactive=True
     )
 
+    # For Non-Azure:
+    # prov = agents.OpenAIProvider(
+    #     "gpt-4o-mini",
+    #     api_key="<api_key>"
+    # )
+
     ag = QAGenerator(
         response_model=QuestionandAnswer,
         provider=prov,

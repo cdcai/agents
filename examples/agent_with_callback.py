@@ -6,6 +6,7 @@ import asyncio
 import agents
 import logging
 import dotenv
+import os
 
 # NOTE: This loads in env vars for openAI
 dotenv.load_dotenv()
@@ -44,6 +45,12 @@ if __name__ == "__main__":
         "gpt-4o-mini-nofilter",
         interactive=True
     )
+
+    # For Non-Azure:
+    # prov = agents.OpenAIProvider(
+    #     "gpt-4o-mini",
+    #     api_key="<api_key>"
+    # )
 
     ag = DummyAgent(
         stopping_condition=agents.StopOnStep(1),
