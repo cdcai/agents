@@ -129,3 +129,17 @@ class AzureOpenAIProvider(_Provider):
             ag.scratchpad += "Response returned truncated from OpenAI due to token length.\n"
             logger.warning("Message returned truncated.")
         return out
+    
+class OpenAIProvider(AzureOpenAIProvider):
+    """
+    Standard (non-Azure) OpenAI provider
+
+    Requires `api_key` passed as a kwarg, or OPENAI_API_KEY set as an environment variable
+    """
+    def __init__(self, model_name: str, **kwargs):
+        self.model_name = model_name
+        self.authenticate()
+        self.llm = openai.AsyncOpenAI(**kwargs)
+    
+    def authenticate(self):
+        pass
