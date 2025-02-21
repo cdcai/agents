@@ -8,6 +8,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..abstract import _Agent
 from ..providers import AzureOpenAIProvider
+from ..scratchpad import ScratchPad
 from ..stopping_conditions import StopOnDataModel
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,6 @@ class Agent(_Agent):
     Each callback will have access to class object, scratchpad, and final answer, thus the signature must match.
     This is still quite experimental, but the intended usecase is for reflection / refinement applications.
     """
-
     def __init__(self, stopping_condition, model_name = None, provider = None, tools = None, callbacks = None, oai_kwargs = None, **fmt_kwargs):
         """
         Base Agent class
@@ -54,6 +54,7 @@ class Agent(_Agent):
         :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
         :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
         """
+        self.scratchpad = ScratchPad(type(self).__name__ + "_" + str(hash(self)))
         self.fmt_kwargs = fmt_kwargs
         self.stopping_condition = stopping_condition
         # We default to Azure OpenAI here, but
@@ -92,7 +93,7 @@ class Agent(_Agent):
 
         # Evaluate callbacks, if available
         for callback in self.CALLBACKS:
-            await callback(self, answer=self.answer, scratchpad=self.scratchpad)
+            await callback(self, answer=self.answer, scratchpad=self.scratchpad())
 
     async def __call__(self, *args, **kwargs) -> str:
         """
@@ -180,13 +181,14 @@ class Agent(_Agent):
         # Conditionally end run and assign answer
         self._check_stop_condition(response)
 
-        if self.terminated:
-            self.scratchpad += "===== Answer ============\n"
-            self.scratchpad += str(self.answer)
-
         # End Step
         self.scratchpad += "==============================\n\n"
         self.curr_step += 1
+
+        if self.terminated:
+            self.scratchpad += "===== Answer ============\n"
+            self.scratchpad += str(self.answer)
+            self.scratchpad += "==============================\n\n"
 
     @staticmethod
     def clean_response(res: str) -> str:
@@ -270,7 +272,7 @@ class Agent(_Agent):
         """
         Reset agent state for a re-run
         """
-        self.scratchpad = ""
+        self.scratchpad.clear()
         self.answer = ""
         self.tool_res_payload = []
         self.callback_output = []
@@ -283,7 +285,7 @@ class Agent(_Agent):
         Dump scratchfile to disk
         """
         with open(outfile, "w", encoding="utf-8") as file:
-            file.writelines(elem + "\n" for elem in self.scratchpad.split("\n"))
+            file.write(self.scratchpad())
 
 class StructuredOutputAgent(Agent):
     """
@@ -350,7 +352,7 @@ class StructuredOutputAgent(Agent):
         """
         Reset agent state for a re-run
         """
-        self.scratchpad = ""
+        self.scratchpad.clear()
         self.answer = {}
         self.tool_res_payload = []
         self.callback_output = []

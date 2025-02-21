@@ -6,10 +6,35 @@ import logging
 import os
 from typing import Callable, List, Optional, Union, Any, Type
 
-import openai
 from openai.types.chat.chat_completion import Choice, ChatCompletionMessage
 
 logger = logging.getLogger(__name__)
+
+class _ScratchPadHandler(logging.Handler):
+    records: List
+
+    def __init__(self, level = 0):
+        self.flush()
+        super().__init__(level)
+    
+    def __call__(self, *args, **kwds):
+        raise NotImplementedError()
+
+    def flush(self):
+        """
+        Reset records
+        """
+        self.records = []
+
+class _ScratchPad:
+    logger: logging.Logger
+    handler: _ScratchPadHandler
+
+    def clear(self):
+        """
+        Clear scratchpad
+        """
+        self.handler.flush()
 
 class _Provider(metaclass=abc.ABCMeta):
     """
@@ -43,7 +68,7 @@ class _Agent(metaclass=abc.ABCMeta):
     truncated: bool = False
     curr_step: int = 1
     output_len: int = 1
-    scratchpad: str = ""
+    scratchpad: _ScratchPad
     answer: Any = ""
     BASE_PROMPT: str = ""
     SYSTEM_PROMPT: str = ""
