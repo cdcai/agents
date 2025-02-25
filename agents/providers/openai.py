@@ -101,7 +101,8 @@ class AzureOpenAIProvider(_Provider):
 
         if len(ag.TOOLS):
             # attempt to parse tool call arguments
-            if out.finish_reason == "tool_calls":
+            # BUG: OpenAI sometimes doesn't return a "tool_calls" reason and uses "stop" instead. Annoying.
+            if out.finish_reason == "tool_calls" or (out.finish_reason == "stop" and len(out.message.tool_calls)):
                 # Append GPT response to next payload
                 # NOTE: This has to come before the next step of parsing
                 ag.tool_res_payload.append(deepcopy(out.message))
