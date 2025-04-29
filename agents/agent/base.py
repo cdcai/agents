@@ -2,7 +2,7 @@ import json
 import logging
 from copy import copy, deepcopy
 from typing import Any, Callable, Optional
-from inspect import isawaitable
+from inspect import iscoroutinefunction
 
 import openai
 from pydantic import BaseModel, ValidationError
@@ -244,7 +244,7 @@ class Agent(_Agent):
                 kwargs : dict[str, any] = tool.function.arguments
 
                 # Handle case where we've defined an async coroutine
-                if isawaitable(fun):
+                if iscoroutinefunction(fun):
                     tool_result = await fun(**kwargs)
                 else:
                     tool_result = fun(**kwargs)
