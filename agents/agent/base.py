@@ -2,6 +2,7 @@ import json
 import logging
 from copy import copy, deepcopy
 from typing import Any, Callable, Optional
+from inspect import isawaitable
 
 import openai
 from pydantic import BaseModel, ValidationError
@@ -175,7 +176,7 @@ class Agent(_Agent):
                 logger.warning("Response truncated due to length, Terminating!")
             # Recursive call if tool calls in response
             else:
-                self._handle_tool_calls(response)
+                await self._handle_tool_calls(response)
         
         # Conditionally end run and assign answer
         self._check_stop_condition(response)
@@ -226,7 +227,7 @@ class Agent(_Agent):
         
         return out
 
-    def _handle_tool_calls(self, response):
+    async def _handle_tool_calls(self, response):
         """
         Handle all tool calls in response object
         
@@ -242,7 +243,11 @@ class Agent(_Agent):
                 # OpenAI returns as str, which should hopefully eval to dict
                 kwargs : dict[str, any] = tool.function.arguments
 
-                tool_result = fun(**kwargs)
+                # Handle case where we've defined an async coroutine
+                if isawaitable(fun):
+                    tool_result = await fun(**kwargs)
+                else:
+                    tool_result = fun(**kwargs)
 
                 self.scratchpad += f"\t=> {tool.function.name}()\n"
                 self.scratchpad += tool_result if type(tool_result) == str else repr(tool_result) + "\n\n"
