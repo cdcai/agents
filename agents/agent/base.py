@@ -174,7 +174,7 @@ class Agent(_Agent):
                 self.truncated = True
                 logger.warning("Response truncated due to length, Terminating!")
             # Recursive call if tool calls in response
-            elif response.finish_reason == "tool_calls":
+            else:
                 self._handle_tool_calls(response)
         
         # Conditionally end run and assign answer
