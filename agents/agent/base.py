@@ -8,7 +8,7 @@ import openai
 from pydantic import BaseModel, ValidationError
 
 from ..abstract import _Agent
-from ..json_tool_gen import agent_callable
+from ..json_tool_gen import AgentCallable
 from ..providers import AzureOpenAIProvider
 from ..stopping_conditions import StopOnDataModel
 
@@ -303,7 +303,7 @@ class Agent(_Agent):
         for obj in dir(self):
             if (
                 callable(getattr(self, obj))
-                and getattr(getattr(self, obj), "agent_callable", False) is True
+                and isinstance(getattr(self, obj), AgentCallable)
             ):
                 payload.append(getattr(getattr(self, obj), "agent_json_payload"))
 
