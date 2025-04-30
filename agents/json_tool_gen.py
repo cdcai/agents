@@ -45,7 +45,7 @@ class AgentCallable:
         Internal function used to generate OpenAI Function Calling JSON payload from function type hints.
         """
         hints = get_type_hints(self.func)
-        hints.pop("result", None) # Ignore return type
+        hints.pop("return", None) # Ignore return type
         sig = inspect.signature(self.func)
         missing_annotations = (set(sig.parameters.keys()) ^ {"self"}) - set(hints.keys())
         missing_descriptions = (set(sig.parameters.keys()) ^ {"self"}) - set(
