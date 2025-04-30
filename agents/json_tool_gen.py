@@ -82,7 +82,7 @@ class AgentCallable:
 
         for arg, hint in hints.items():
             try:
-                arg_properties = arg_to_oai_type(hint)
+                arg_properties = self.arg_to_oai_type(hint)
             except KeyError as e:
                 raise KeyError("Processing arg {} failed. {}".format(arg, str(e)))
             arg_properties["description"] = self.variable_description[arg]
