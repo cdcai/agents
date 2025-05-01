@@ -163,3 +163,31 @@ def agent_callable(description: str, variable_description: dict[str, str]):
         return wrapper
 
     return agent_callable_wrapper
+
+def async_agent_callable(description: str, variable_description: dict[str, str]):
+    """
+    Marks a coroutine as accessible to a language agent
+    and generates required JSON payload by extracting type hints.
+
+    Args:
+        description (str): A description of the function which will be shared with the language agent
+        variable_description (dict[str, str]): A dict with entries for each variable of the function describing what each variable is
+    """
+
+    def agent_callable_wrapper(func: Callable):
+
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            result = await func(*args, **kwargs)
+            return result
+
+        # Generate the JSON payload needed for OpenAI Function Calling API
+        # and assign it to an attribute we can extract at Agent init time
+        json_payload = generate_tool_json_payload(
+            func, description, variable_description
+        )
+        setattr(wrapper, "agent_tool_payload", json_payload)
+
+        return wrapper
+
+    return agent_callable_wrapper
