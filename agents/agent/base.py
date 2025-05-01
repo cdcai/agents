@@ -8,7 +8,6 @@ import openai
 from pydantic import BaseModel, ValidationError
 
 from ..abstract import _Agent
-from ..json_tool_gen import AgentCallable
 from ..providers import AzureOpenAIProvider
 from ..stopping_conditions import StopOnDataModel
 
