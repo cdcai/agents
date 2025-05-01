@@ -303,9 +303,9 @@ class Agent(_Agent):
         for obj in dir(self):
             if (
                 callable(getattr(self, obj))
-                and isinstance(getattr(self, obj), AgentCallable)
+                and len(getattr(getattr(self, obj), "agent_tool_payload", []))
             ):
-                payload.append(getattr(getattr(self, obj), "agent_json_payload"))
+                payload.append(getattr(getattr(self, obj), "agent_tool_payload"))
 
         return payload
 
