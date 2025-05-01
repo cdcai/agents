@@ -6,6 +6,17 @@ from .abstract import _StoppingCondition
 from pydantic import BaseModel
 from typing import Optional
 
+class StoppingCondition(_StoppingCondition):
+    """
+    A callable that contains some logic to determine whether a language agent
+    has finished it's run. This is called at the end of every turn via the `__call__` method.
+    
+    This class is abstract and should be subclassed with requisite `__call__` and `__init__` methods.
+
+    The main call should always return the final answer, if we've finished the run, or None otherwise
+    """
+    pass
+
 class StopOnStep(_StoppingCondition):
     """
     Stop language agent on a given step

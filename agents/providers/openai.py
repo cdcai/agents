@@ -1,7 +1,7 @@
 import logging
 import os
 from copy import deepcopy
-from typing import List, Type
+from typing import List, Type, Union
 import json
 
 import backoff
@@ -43,6 +43,8 @@ class AzureOpenAIProvider(_Provider):
 
         :returns: API key assigned to `AZURE_OPENAI_API_KEY` and `OPENAI_API_KEY` environ variables
         """
+        credential: Union[InteractiveBrowserCredential, ClientSecretCredential]
+        
         if self.interactive:
             credential = InteractiveBrowserCredential()
         else:
@@ -99,7 +101,9 @@ class AzureOpenAIProvider(_Provider):
 
         if len(ag.TOOLS):
             # attempt to parse tool call arguments
-            if out.finish_reason == "tool_calls":
+            # BUG: OpenAI sometimes doesn't return a "tool_calls" reason and uses "stop" instead. Annoying.
+            if out.finish_reason == "tool_calls" or (out.finish_reason == "stop" and len(out.message.tool_calls)):
+                out.finish_reason = "tool_calls"
                 # Append GPT response to next payload
                 # NOTE: This has to come before the next step of parsing
                 ag.tool_res_payload.append(deepcopy(out.message))
@@ -127,3 +131,17 @@ class AzureOpenAIProvider(_Provider):
             ag.scratchpad += "Response returned truncated from OpenAI due to token length.\n"
             logger.warning("Message returned truncated.")
         return out
+    
+class OpenAIProvider(AzureOpenAIProvider):
+    """
+    Standard (non-Azure) OpenAI provider
+
+    Requires `api_key` passed as a kwarg, or OPENAI_API_KEY set as an environment variable
+    """
+    def __init__(self, model_name: str, **kwargs):
+        self.model_name = model_name
+        self.authenticate()
+        self.llm = openai.AsyncOpenAI(**kwargs)
+    
+    def authenticate(self):
+        pass

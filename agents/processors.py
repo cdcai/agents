@@ -44,7 +44,7 @@ class _BatchProcessor(metaclass=ABCMeta):
         else:
             # Default to AzureOpenAI
             try:
-                self.provider = AzureOpenAIProvider(model_name=kwargs["model_name"])
+                self.provider = AzureOpenAIProvider(model_name=kwargs["model_name"], interactive=True)
             except KeyError:
                 raise RuntimeError("If `provider` is not passed, `model_name` must be passed to initialize one!")
         
@@ -180,9 +180,17 @@ class _BatchProcessor(metaclass=ABCMeta):
         """
         return str(batch)
 
-    def _spawn_agent(self, batch: Iterable) -> Agent:
+    def _spawn_agent(self, batch: Iterable, **kwargs) -> Agent:
+        """
+        Spawn agent for next run, formatting batch as appropriate
+
+        :param batch: An iterable, the next piece of data to be processed from in_q
+        :param kwargs: Any additional named arguments passed to initializer of agent class
+
+        :return: An initialized Agent class
+        """
         batch_str = self._batch_format(batch)
-        out = self.agent_class(provider=self.provider, **self.agent_kwargs, batch=batch_str) # type: ignore[misc]
+        out = self.agent_class(provider=self.provider, **self.agent_kwargs, batch=batch_str, **kwargs) # type: ignore[misc]
         return out
 
 class BatchProcessor(_BatchProcessor):

@@ -35,7 +35,7 @@ class _StoppingCondition(metaclass=abc.ABCMeta):
     The main call should always return the final answer, if we've finished the run, or None otherwise
     """
     @abc.abstractmethod
-    def __call__(self, cls: '_Agent', response: str) -> Optional[Any]:
+    def __call__(self, cls: Type['_Agent'], response: Choice) -> Optional[Any]:
         raise NotImplementedError()
 
 class _Agent(metaclass=abc.ABCMeta):

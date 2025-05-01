@@ -1,13 +1,13 @@
 import json
 import logging
 from copy import copy, deepcopy
+from inspect import iscoroutinefunction
 from typing import Any, Callable, Optional
 
 import openai
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ..abstract import _Agent
-from ..decorators import response_model_handler
 from ..providers import AzureOpenAIProvider
 from ..stopping_conditions import StopOnDataModel
 
@@ -69,6 +69,9 @@ class Agent(_Agent):
 
         if tools is not None:
             self.TOOLS.extend(tools)
+
+        # Add any methods defined with decorator
+        self.TOOLS.extend(self._check_agent_callable_methods())
 
         # Handle Callbacks
         self.CALLBACKS = getattr(self, "CALLBACKS", [])
@@ -175,8 +178,8 @@ class Agent(_Agent):
                 self.truncated = True
                 logger.warning("Response truncated due to length, Terminating!")
             # Recursive call if tool calls in response
-            elif response.finish_reason == "tool_calls":
-                self._handle_tool_calls(response)
+            elif response.message.tool_calls is not None:
+                await self._handle_tool_calls(response)
         
         # Conditionally end run and assign answer
         self._check_stop_condition(response)
@@ -227,7 +230,7 @@ class Agent(_Agent):
         
         return out
 
-    def _handle_tool_calls(self, response):
+    async def _handle_tool_calls(self, response):
         """
         Handle all tool calls in response object
         
@@ -243,22 +246,32 @@ class Agent(_Agent):
                 # OpenAI returns as str, which should hopefully eval to dict
                 kwargs : dict[str, any] = tool.function.arguments
 
-                tool_result = fun(**kwargs)
+                # Handle case where we've defined an async coroutine
+                if iscoroutinefunction(fun):
+                    tool_result = await fun(**kwargs)
+                else:
+                    tool_result = fun(**kwargs)
 
                 self.scratchpad += f"\t=> {tool.function.name}()\n"
                 self.scratchpad += tool_result if type(tool_result) == str else repr(tool_result) + "\n\n"
 
-                self.tool_res_payload.append(
-                    {
-                        "tool_call_id": tool.id,
-                        "role": "tool",
-                        "content": tool_result
-                    }
-                )
+            except ValidationError as err:
+                # CASE: Tool call was a pydantic BaseModel and it failed validation
+                # We'd want to send error back to model to correct as opposed to raising
+                logger.warning(f"Response didn't pass pydantic validation.")
+                tool_result = str(err)
             except Exception as e:
+                # Else, raise and fail.
                 logger.error(f"Tool call {tool.function.name} failed.")
                 raise e
-
+                
+            self.tool_res_payload.append(
+                {
+                    "tool_call_id": tool.id,
+                    "role": "tool",
+                    "content": tool_result
+                }
+            )
             self.scratchpad += "---------------------------------\n\n"
 
     def reset(self) -> None:
@@ -280,6 +293,21 @@ class Agent(_Agent):
         with open(outfile, "w", encoding="utf-8") as file:
             file.writelines(elem + "\n" for elem in self.scratchpad.split("\n"))
 
+    def _check_agent_callable_methods(self):
+        """
+        Scans class for methods that are flagged as agent callable via decorator
+        which alleviates some boilerplate for manually defining JSON schema along with method
+        """
+        payload = []
+        for obj in dir(self):
+            if (
+                callable(getattr(self, obj))
+                and len(getattr(getattr(self, obj), "agent_tool_payload", []))
+            ):
+                payload.append(getattr(getattr(self, obj), "agent_tool_payload"))
+
+        return payload
+
 class StructuredOutputAgent(Agent):
     """
     An Agent with accepts a pydantic BaseModel to use as a tool / validator for model output
@@ -287,6 +315,7 @@ class StructuredOutputAgent(Agent):
     A class method is constructed at runtime along with a stopping condition which triggers when a `response_model` object is detected in the response.
     """
     answer: dict[str, Any]
+    _response_model_warn : bool = True
 
     def __init__(self, response_model: type[BaseModel], model_name: Optional[str] = None, stopping_condition=None, provider=None, tools=None, callbacks=None, oai_kwargs=None, **fmt_kwargs):
         """
@@ -310,8 +339,11 @@ class StructuredOutputAgent(Agent):
         
         if stopping_condition is None:
             stopping_condition = StopOnDataModel(response_model)
+        elif stopping_condition is not None and self._response_model_warn:
+            logger.warning("StructuredOutputAgent assumes a `StopOnBaseModel` stopping condition, but you passed another at runtime which will take precedence. This may lead to errors. This warning will only be displayed once per session.")
+            StructuredOutputAgent._response_model_warn = False # Once per session
         else:
-            logger.warning("StructuredOutputAgent assumes a `StopOnBaseModel` stopping condition, but you passed another at runtime which will take precedence. This may lead to errors.")
+            pass
 
         oai_tool = openai.pydantic_function_tool(response_model)
 
@@ -325,7 +357,7 @@ class StructuredOutputAgent(Agent):
 
         # Assign a class method 
         fun_name = oai_tool["function"]["name"]
-        setattr(self, fun_name, response_model_handler(self.response_model))
+        setattr(self, fun_name, self.response_model)
 
         super().__init__(
             stopping_condition=stopping_condition,
