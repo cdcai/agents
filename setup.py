@@ -20,6 +20,6 @@ setup(
     packages=find_packages(include=["agents", "agents.*"]),
     install_requires=requirements,
     tests_require=[
-        "pytest",
+        "pytest", "pytest-mock"
     ]
 )

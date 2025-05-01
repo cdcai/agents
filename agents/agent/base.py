@@ -1,8 +1,8 @@
 import json
 import logging
 from copy import copy, deepcopy
-from typing import Any, Callable, Optional
 from inspect import iscoroutinefunction
+from typing import Any, Callable, Optional
 
 import openai
 from pydantic import BaseModel, ValidationError
@@ -69,6 +69,9 @@ class Agent(_Agent):
 
         if tools is not None:
             self.TOOLS.extend(tools)
+
+        # Add any methods defined with decorator
+        self.TOOLS.extend(self._check_agent_callable_methods())
 
         # Handle Callbacks
         self.CALLBACKS = getattr(self, "CALLBACKS", [])
@@ -289,6 +292,21 @@ class Agent(_Agent):
         """
         with open(outfile, "w", encoding="utf-8") as file:
             file.writelines(elem + "\n" for elem in self.scratchpad.split("\n"))
+
+    def _check_agent_callable_methods(self):
+        """
+        Scans class for methods that are flagged as agent callable via decorator
+        which alleviates some boilerplate for manually defining JSON schema along with method
+        """
+        payload = []
+        for obj in dir(self):
+            if (
+                callable(getattr(self, obj))
+                and len(getattr(getattr(self, obj), "agent_tool_payload", []))
+            ):
+                payload.append(getattr(getattr(self, obj), "agent_tool_payload"))
+
+        return payload
 
 class StructuredOutputAgent(Agent):
     """
