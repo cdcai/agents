@@ -49,7 +49,7 @@ class ToolCall:
         if either fail, append error for re-prompt
         """
         try:
-            self.func: Callable = getattr(self, self.func_name)
+            self.func: Callable = getattr(self.agent, self.func_name)
             assert self.func_name in self.agent._known_tools
         except (AttributeError, AssertionError):
             logger.warning(
