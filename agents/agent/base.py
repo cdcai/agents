@@ -1,15 +1,15 @@
-import json
+import asyncio
 import logging
-from copy import copy, deepcopy
-from inspect import iscoroutinefunction
-from typing import Any, Callable, Optional
+from copy import copy
+from typing import Any, Optional
 
 import openai
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from ..abstract import _Agent
 from ..providers import AzureOpenAIProvider
 from ..stopping_conditions import StopOnDataModel
+from ..tools import ToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -138,37 +138,7 @@ class Agent(_Agent):
         response = None
         n_retry = 3
         while response is None and n_retry > 0:
-            try:
-                response = await self.provider.prompt_agent(self, llm_prompt_input, **self.oai_kwargs)
-            except json.decoder.JSONDecodeError as e:
-                if n_retry == 0:
-                    raise e
-                else:
-                    self.scratchpad += "JSONDecodeError in tool call argumement parsing. Retrying.\n"
-                    logger.warning(f"Tool calls in response couldn't be decoded. {n_retry} retries remaining.")
-                    llm_prompt_input.append(
-                        {
-                            "role": "user",
-                            "content": "The arguments to your previous tool call couldn't be parsed correctly. Please ensure you properly escapse quotes and construct a valid JSON payload."
-                        }
-                    )
-                    n_retry -= 1
-                    continue
-            except AssertionError as e:
-                # Agent tries to apply unknown function
-                if n_retry == 0:
-                    raise e
-                else:
-                    self.scratchpad += "Attempted to apply non-function, retrying.\n"
-                    logger.warning(f"Agent attempted to apply undefined function. {n_retry} retries remaining.")
-                    llm_prompt_input.append(
-                            {
-                                "role": "system",
-                                "content": f"You attempted to apply an undefined function, you may only use the following functions as tool calls: {self._known_tools}."
-                            }
-                    )
-                    n_retry -= 1
-                    continue
+            response = await self.provider.prompt_agent(self, llm_prompt_input, **self.oai_kwargs)
         if response is None:
             logger.warning("No response after 3 retries, Terminating!")
             self.truncated = True
@@ -238,41 +208,41 @@ class Agent(_Agent):
 
         The output of that method is appended to a new message in the tool_res_payload list, for downstream querying.
         """
-        for tool in response.message.tool_calls:
-            self.scratchpad += "--- Evaluating Toolcalls -----------------\n"
-            # Try to call tool, if present, else raise.
-            try:
-                fun : Callable = getattr(self, tool.function.name)
-                # OpenAI returns as str, which should hopefully eval to dict
-                kwargs : dict[str, any] = tool.function.arguments
+        # Guarding
+        if response.message.tool_calls is None:
+            return None
 
-                # Handle case where we've defined an async coroutine
-                if iscoroutinefunction(fun):
-                    tool_result = await fun(**kwargs)
+        self.scratchpad += "--- Evaluating Toolcalls -----------------\n"
+
+        # Run all awaitables
+        tool_calls = [ToolCall(self, tool) for tool in response.message.tool_calls]
+        tool_call_tasks = [tool_call() for tool_call in tool_calls]
+
+        tool_call_results = await asyncio.gather(*tool_call_tasks, return_exceptions=True)
+        
+        # We might have handled all the calls before we ever dispatched, so only proceed if there were
+        # tasks to check
+        if len(tool_call_results):
+            self.scratchpad += "Tool call results:\n\n"
+            for payload, result in zip(tool_calls, tool_call_results):
+                # Log it
+                toolcall_str = f"{payload.func_name}({str(payload.kwargs)[:100] + '...(trunc)' if len(str(payload.kwargs)) > 100 else str(payload.kwargs)})"
+                logger.info(f"Got tool call: {toolcall_str}")
+                self.scratchpad += f"\t=> {toolcall_str}\n"
+                self.scratchpad += "\t\t"
+
+                # Check if a task errored and raise if so
+                if isinstance(result, BaseException):
+                    self.scratchpad += str(result)
+                    raise result
                 else:
-                    tool_result = fun(**kwargs)
+                    self.tool_res_payload.append(result)
 
-                self.scratchpad += f"\t=> {tool.function.name}()\n"
-                self.scratchpad += tool_result if type(tool_result) == str else repr(tool_result) + "\n\n"
-
-            except ValidationError as err:
-                # CASE: Tool call was a pydantic BaseModel and it failed validation
-                # We'd want to send error back to model to correct as opposed to raising
-                logger.warning(f"Response didn't pass pydantic validation.")
-                tool_result = str(err)
-            except Exception as e:
-                # Else, raise and fail.
-                logger.error(f"Tool call {tool.function.name} failed.")
-                raise e
-                
-            self.tool_res_payload.append(
-                {
-                    "tool_call_id": tool.id,
-                    "role": "tool",
-                    "content": tool_result
-                }
-            )
-            self.scratchpad += "---------------------------------\n\n"
+                    self.scratchpad += "\t\t"
+                    self.scratchpad += result["content"] if type(result["content"]) == str else repr(result["content"])
+                    self.scratchpad += "\n\n"
+        
+        self.scratchpad += "---------------------------------\n\n"
 
     def reset(self) -> None:
         """
