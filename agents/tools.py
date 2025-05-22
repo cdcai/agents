@@ -31,7 +31,7 @@ class ToolCall:
     id: str = field(init=False)
     func_name: str = field(init=False)
     func: Callable = field(init=False)
-    kwargs: Dict[str, Any] = field(init=False)
+    kwargs: Dict[str, Any] = field(default_factory=dict, init=False)
     errors: Optional[str] = field(init=False, default=None)
 
     def __post_init__(self):
@@ -62,7 +62,7 @@ class ToolCall:
         Either assign kwargs for tool call, if JSON payload is able to be decoded, or append error for re-prompt
         """
         try:
-            self.kwargs: dict[str, Any] = json.loads(self.tool_call.function.arguments)
+            self.kwargs.update(json.loads(self.tool_call.function.arguments))
         except json.JSONDecodeError as e:
             logger.warning(
                 f"Tool call {self.func_name} in response couldn't be decoded: {str(e)}"
