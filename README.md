@@ -9,9 +9,21 @@ This package contains a few classes that can be used as building blocks for lang
 
 All code uses asyncio by design, and though I've tried to generalize as I can, I mostly built around OpenAI and specifically Azure OpenAI since that's what we are allowed to work with internally.
 
+## Really? Another agent framework? Should I even use this library?
+
+Maybe you *shouldn't* use this library.
+
+After all, there are whole teams and companies of real software engineers working on similar frameworks that should suit your use-case:
+
+- [LangGraph](https://github.com/langchain-ai/langgraph)
+- [smolagents](https://github.com/huggingface/smolagents)
+- [AutoGen](https://github.com/microsoft/autogen)
+
+By design, this library was designed to be python-ic, minimally invasive, and not require a lot of boilerplate to do what is essentially just string formatting and API request handling. It serves me well, but may not serve you.
+
 ## Installation
 
-Not currently on pypi, so just use pip to install via GitHub:
+This isn't currently on pypi, so just use pip to install directly via GitHub:
 
 ```sh
 pip install git+https://github.com/cdcai/multiagent.git
