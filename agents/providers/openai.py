@@ -8,6 +8,7 @@ from azure.identity import ClientSecretCredential, InteractiveBrowserCredential
 from openai.types.chat import ChatCompletionMessage
 
 from ..abstract import _Agent, _Provider
+from ..tools import OpenAIToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,8 @@ class AzureOpenAIProvider(_Provider):
     :param bool interactive: Should authentication use an Interactive AD Login (T), or ClientSecret (F)?
     :param **kwargs: Any additional kw-args for AsyncAzureOpenAI
     """
+    tool_call_wrapper = OpenAIToolCall
+
     def __init__(self, model_name: str, interactive: bool, **kwargs):
         self.model_name = model_name
         self.interactive = interactive
@@ -106,22 +109,7 @@ class AzureOpenAIProvider(_Provider):
                 out.finish_reason = "tool_calls"
                 # Append GPT response to next payload
                 # NOTE: This has to come before the next step of parsing
-                ag.tool_res_payload.append(deepcopy(out.message))
-
-                ag.scratchpad += "Tool calls: \n"
-                for i, tool in enumerate(out.message.tool_calls):
-                    try:
-                        assert tool.function.name in ag._known_tools
-                    except Exception as e:
-                        ag.tool_res_payload.pop()
-                        raise e
-
-                    out.message.tool_calls[i].function.arguments = json.loads(tool.function.arguments)
-
-                    # Log it
-                    toolcall_str = f"{tool.function.name}({str(tool.function.arguments)[:50] + '...(trunc)' if len(str(tool.function.arguments)) > 50 else str(tool.function.arguments)})"
-                    logger.info(f"Got toolcall: {toolcall_str}")
-                    ag.scratchpad += f"\t=> {toolcall_str}\n"
+                ag.tool_res_payload.append(out.message)
         
         ag.scratchpad += "\n-----------------------------------\n"
         logger.info(f"Received response: {out.message.content}")

@@ -1,10 +1,47 @@
+import logging
 import subprocess
 import sys
 import tempfile
-from typing import Literal
+from dataclasses import dataclass
+from typing import Dict, Literal
+
+from openai.types.chat import ChatCompletionMessageToolCall
+from pydantic import BaseModel
+
+from .abstract import _ToolCall
+
+logger = logging.getLogger(__name__)
 
 
-def _subprocess_tool_call_on_file(tool_input: str, cmd_args: list[str], output_type: Literal["stdout", "file"] = "stdout") -> str:
+@dataclass
+class OpenAIToolCall(_ToolCall):
+    """
+    An encapsulating class for tool calls from an OpenAI lanaguge agent
+    """
+    tool_call: ChatCompletionMessageToolCall
+
+    @property
+    def id(self) -> str:
+        return self.tool_call.id
+    
+    @property
+    def func_name(self) -> str:
+        return self.tool_call.function.name
+
+    @property
+    def arg_str(self) -> str:
+        return self.tool_call.function.arguments
+
+    @staticmethod
+    def _construct_return_message(id: str, response: str | BaseModel) -> Dict[str, str | BaseModel]:
+        return {"tool_call_id": id, "role": "tool", "content": response}
+
+
+def _subprocess_tool_call_on_file(
+    tool_input: str,
+    cmd_args: list[str],
+    output_type: Literal["stdout", "file"] = "stdout",
+) -> str:
     """
     A helper function that writes `tool_input` to a file and runs a python module on that file, either returning stdout+stderr or the contents of the file after the subprocess call.
 
@@ -13,7 +50,7 @@ def _subprocess_tool_call_on_file(tool_input: str, cmd_args: list[str], output_t
     :param tool_input (str): A string to pass as input to the tool (this is likely code)
     :param cmd_args (list[str]): Command-line args between the python -m call and the file name (should include the python module to call and any additional arguments)
     :param output_type (str): The output to return (either stdout+error, or contents of the tempfile, if this is modified)
-    
+
     :return: Either stdout and stderr concatenated into a string and separated by a newline, or `tool_input` after calling the python module
     """
     with tempfile.TemporaryFile("w", delete=False) as file:
@@ -22,9 +59,7 @@ def _subprocess_tool_call_on_file(tool_input: str, cmd_args: list[str], output_t
 
         # Run mypy in a subprocess and capture stderr and stdout
         subprocess_output = subprocess.run(
-            [sys.executable, "-m", *cmd_args, file.name],
-            capture_output=True,
-            text=True
+            [sys.executable, "-m", *cmd_args, file.name], capture_output=True, text=True
         )
 
         if output_type == "stdout":
@@ -32,8 +67,8 @@ def _subprocess_tool_call_on_file(tool_input: str, cmd_args: list[str], output_t
         elif output_type == "file":
             with open(file.name, "r", encoding="utf-8") as f:
                 out = f.read()
-            
-            return(out)
+
+            return out
         else:
             # Shouldn't be reachable
             raise NotImplementedError()
