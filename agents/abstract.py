@@ -189,7 +189,7 @@ class _Provider(metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    async def prompt_agent(self, ag: Type['_Agent'], prompt: list[dict[str, str]], **kwargs):
+    async def prompt_agent(self, ag: '_Agent', prompt: list[dict[str, str]], **kwargs):
         pass
 
 class _StoppingCondition(metaclass=abc.ABCMeta):
@@ -200,7 +200,7 @@ class _StoppingCondition(metaclass=abc.ABCMeta):
     The main call should always return the final answer, if we've finished the run, or None otherwise
     """
     @abc.abstractmethod
-    def __call__(self, cls: Type['_Agent'], response: Choice) -> Optional[Any]:
+    def __call__(self, cls: '_Agent', response: Choice) -> Optional[Any]:
         raise NotImplementedError()
 
 class _Agent(metaclass=abc.ABCMeta):
