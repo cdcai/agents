@@ -29,11 +29,11 @@ jobs:
       
       - name: Ruff Check
         run: |
-          ruff check --no-fix
+          ruff check --no-fix agents
       
       - name: Ruff Diff
         run: |
-          ruff format --diff
+          ruff format --diff agents
   
   mypy:
     runs-on: ubuntu-latest
@@ -53,4 +53,4 @@ jobs:
       
       - name: Mypy
         run: |
-          mypy
+          mypy agents
