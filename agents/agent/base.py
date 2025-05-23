@@ -9,7 +9,6 @@ from pydantic import BaseModel
 from ..abstract import _Agent
 from ..providers import AzureOpenAIProvider
 from ..stopping_conditions import StopOnDataModel
-from ..tools import ToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +214,7 @@ class Agent(_Agent):
         self.scratchpad += "--- Evaluating Toolcalls -----------------\n"
 
         # Run all awaitables
-        tool_calls = [ToolCall(self, tool) for tool in response.message.tool_calls]
+        tool_calls = [self.provider.tool_call_wrapper(self, tool) for tool in response.message.tool_calls]
         tool_call_tasks = [tool_call() for tool_call in tool_calls]
 
         tool_call_results = await asyncio.gather(*tool_call_tasks, return_exceptions=True)

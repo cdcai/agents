@@ -8,6 +8,7 @@ from azure.identity import ClientSecretCredential, InteractiveBrowserCredential
 from openai.types.chat import ChatCompletionMessage
 
 from ..abstract import _Agent, _Provider
+from ..tools import OpenAIToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,8 @@ class AzureOpenAIProvider(_Provider):
     :param bool interactive: Should authentication use an Interactive AD Login (T), or ClientSecret (F)?
     :param **kwargs: Any additional kw-args for AsyncAzureOpenAI
     """
+    tool_call_wrapper = OpenAIToolCall
+
     def __init__(self, model_name: str, interactive: bool, **kwargs):
         self.model_name = model_name
         self.interactive = interactive
