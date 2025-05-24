@@ -32,8 +32,8 @@ class AzureOpenAIProvider(_Provider):
     """
 
     tool_call_wrapper = OpenAIToolCall
-    llm : Union[openai.AsyncAzureOpenAI, openai.AsyncOpenAI]
-    
+    llm: Union[openai.AsyncAzureOpenAI, openai.AsyncOpenAI]
+
     def __init__(self, model_name: str, interactive: bool, **kwargs):
         self.model_name = model_name
         self.interactive = interactive
@@ -70,7 +70,10 @@ class AzureOpenAIProvider(_Provider):
         backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3
     )
     async def prompt_agent(
-        self, ag: _Agent, prompt: Union[List[ChatCompletionMessageParam], ChatCompletionMessageParam], **kwargs
+        self,
+        ag: _Agent,
+        prompt: Union[List[ChatCompletionMessageParam], ChatCompletionMessageParam],
+        **kwargs,
     ):
         """
         An async version of the main OAI prompting logic.
@@ -116,7 +119,9 @@ class AzureOpenAIProvider(_Provider):
             # attempt to parse tool call arguments
             # BUG: OpenAI sometimes doesn't return a "tool_calls" reason and uses "stop" instead. Annoying.
             if out.finish_reason == "tool_calls" or (
-                out.finish_reason == "stop" and out.message.tool_calls and len(out.message.tool_calls)
+                out.finish_reason == "stop"
+                and out.message.tool_calls
+                and len(out.message.tool_calls)
             ):
                 out.finish_reason = "tool_calls"
                 # Append GPT response to next payload
