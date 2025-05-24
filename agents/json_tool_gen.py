@@ -36,8 +36,9 @@ PYTHON_TO_OAI_SCHEMA = {
     NoneType: "null",
 }
 
+__all__ = ['agent_callable', 'async_agent_callable']
 
-def arg_to_oai_type(arg: Any) -> Dict[str, Any]:
+def arg_to_oai_type(arg: Any):
     """
     Converting Python type hint to OpenAI type for JSON payload.
 
@@ -67,9 +68,9 @@ def arg_to_oai_type(arg: Any) -> Dict[str, Any]:
             for key, value in union_type.items():
                 if key in out:
                     if isinstance(out[key], list):
-                        out[key].append(value)
-                    else:
-                        out[key] = [out[key], value]
+                        out[key].append(value) # type: ignore
+                    elif isinstance(out[key], str):
+                        out[key] = [out[key], value] # type: ignore
                 else:
                     out[key] = value
 

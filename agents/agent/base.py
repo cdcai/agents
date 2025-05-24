@@ -12,7 +12,6 @@ from ..stopping_conditions import StopOnDataModel
 
 logger = logging.getLogger(__name__)
 
-
 class Agent(_Agent):
     """
     Base Class for language agents, which can be initialized directly or subclassed depending on use case.
@@ -238,7 +237,7 @@ class Agent(_Agent):
                     self.tool_res_payload.append(result)
 
                     self.scratchpad += "\t\t"
-                    self.scratchpad += result["content"] if type(result["content"]) == str else repr(result["content"])
+                    self.scratchpad += result["content"] if isinstance(result["content"], str) else repr(result["content"])
                     self.scratchpad += "\n\n"
         
         self.scratchpad += "---------------------------------\n\n"

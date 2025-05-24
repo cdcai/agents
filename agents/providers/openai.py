@@ -78,7 +78,7 @@ class AzureOpenAIProvider(_Provider):
         if isinstance(prompt, dict):
             prompt = [prompt]
 
-        ag.scratchpad += f"--- Input ---------------------------\n"
+        ag.scratchpad += "--- Input ---------------------------\n"
         ag.scratchpad += "\n".join(msg["content"] for msg in prompt if not isinstance(msg, ChatCompletionMessage))
         ag.scratchpad += "\n-----------------------------------\n"
     

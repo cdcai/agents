@@ -147,7 +147,7 @@ class _BatchProcessor(metaclass=ABCMeta):
                     logger.error(f"[_worker - {worker_name}]: No answer was provided for query {id}")
                     errored = True
 
-            except asyncio.CancelledError as e:
+            except asyncio.CancelledError:
                 logger.info(f"[_worker - {worker_name}]: Got CancelledError, terminating.")
                 break
 
