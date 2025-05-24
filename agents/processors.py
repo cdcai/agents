@@ -2,7 +2,7 @@ import asyncio
 import logging
 from abc import ABCMeta, abstractmethod
 from itertools import islice
-from typing import Any, Iterable, Iterator, Optional, Sequence, Tuple, Type
+from typing import Any, Iterable, Iterator, Optional, Sequence, Tuple
 
 import polars as pl
 from tqdm import tqdm
@@ -24,7 +24,7 @@ class _BatchProcessor(metaclass=ABCMeta):
         self,
         data: Iterable,
         agent_class: type[Agent],
-        provider: Optional[Type[_Provider]],
+        provider: Optional[_Provider],
         batch_size: int = 5,
         n_workers: int = 1,
         n_retry: int = 5,

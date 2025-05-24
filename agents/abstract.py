@@ -195,7 +195,7 @@ class _Provider(metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    async def prompt_agent(self, ag: "_Agent", prompt: list[dict[str, str]], **kwargs):
+    async def prompt_agent(self, ag: "_Agent", prompt: Any, **kwargs):
         pass
 
 

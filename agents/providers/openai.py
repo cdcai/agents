@@ -1,11 +1,11 @@
 import logging
 import os
-from typing import List, Type, Union
+from typing import List, Union
 
 import backoff
 import openai
 from azure.identity import ClientSecretCredential, InteractiveBrowserCredential
-from openai.types.chat import ChatCompletionMessage
+from openai.types.chat import ChatCompletionMessageParam
 
 from ..abstract import _Agent, _Provider
 from ..tools import OpenAIToolCall
@@ -32,7 +32,8 @@ class AzureOpenAIProvider(_Provider):
     """
 
     tool_call_wrapper = OpenAIToolCall
-
+    llm : Union[openai.AsyncAzureOpenAI, openai.AsyncOpenAI]
+    
     def __init__(self, model_name: str, interactive: bool, **kwargs):
         self.model_name = model_name
         self.interactive = interactive
@@ -69,7 +70,7 @@ class AzureOpenAIProvider(_Provider):
         backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3
     )
     async def prompt_agent(
-        self, ag: Type[_Agent], prompt: List[dict[str, str]], **kwargs
+        self, ag: _Agent, prompt: Union[List[ChatCompletionMessageParam], ChatCompletionMessageParam], **kwargs
     ):
         """
         An async version of the main OAI prompting logic.
@@ -83,15 +84,13 @@ class AzureOpenAIProvider(_Provider):
 
         # Prompts should be passed as a list, so handle
         # the case where we just passed a single dict
-        if isinstance(prompt, dict):
+        if not isinstance(prompt, list):
             prompt = [prompt]
 
         ag.scratchpad += "--- Input ---------------------------\n"
-        ag.scratchpad += "\n".join(
-            msg["content"]
-            for msg in prompt
-            if not isinstance(msg, ChatCompletionMessage)
-        )
+        for msg in prompt:
+            if "content" in msg and isinstance(msg["content"], str):
+                ag.scratchpad += "\n" + msg["content"]
         ag.scratchpad += "\n-----------------------------------\n"
 
         try:
@@ -117,7 +116,7 @@ class AzureOpenAIProvider(_Provider):
             # attempt to parse tool call arguments
             # BUG: OpenAI sometimes doesn't return a "tool_calls" reason and uses "stop" instead. Annoying.
             if out.finish_reason == "tool_calls" or (
-                out.finish_reason == "stop" and len(out.message.tool_calls)
+                out.finish_reason == "stop" and out.message.tool_calls and len(out.message.tool_calls)
             ):
                 out.finish_reason = "tool_calls"
                 # Append GPT response to next payload

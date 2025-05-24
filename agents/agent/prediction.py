@@ -72,7 +72,8 @@ class PredictionAgent(StructuredOutputAgent):
         """
 
         class classify(pydantic.BaseModel):
-            labels: List[Literal[tuple(self.labels)]] = pydantic.Field(
+            # NOTE: This is kind of hacky since we're using runtime type-hints
+            labels: List[Literal[tuple(self.labels)]] = pydantic.Field( #type: ignore
                 description="Classify the input data into one of the possible categories"
             )
 
@@ -107,7 +108,8 @@ class PredictionAgentWithJustification(PredictionAgent):
         """
 
         class classify(pydantic.BaseModel):
-            labels: List[Literal[tuple(self.labels)]] = pydantic.Field(
+            # NOTE: This is kind of hacky since we're using runtime type-hints
+            labels: List[Literal[tuple(self.labels)]] = pydantic.Field( #type: ignore
                 description="Classify the input data into one of the possible categories"
             )
             justification: List[str] = pydantic.Field(
