@@ -1,9 +1,6 @@
 import logging
-import subprocess
-import sys
-import tempfile
 from dataclasses import dataclass
-from typing import Dict, Literal, Union
+from typing import Dict, Union
 
 from openai.types.chat import ChatCompletionMessageToolCall
 from pydantic import BaseModel
