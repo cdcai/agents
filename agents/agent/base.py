@@ -1,11 +1,10 @@
-import json
+import asyncio
 import logging
-from copy import copy, deepcopy
-from inspect import iscoroutinefunction
-from typing import Any, Callable, Optional
+from copy import copy
+from typing import Any, Optional
 
 import openai
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from ..abstract import _Agent
 from ..providers import AzureOpenAIProvider
@@ -30,8 +29,8 @@ class Agent(_Agent):
     :param list TOOLS: List of tools the agent can use. Can be defined in subclass or at runtime. (see: https://platform.openai.com/docs/guides/function-calling)
     :param list CALLBACKS: List of callbacks to evaluate at completion. Should be a list of callables with a signature `fun(self, answer, scratchpad)`
     :param _StoppingCondition stopping_condition: The StoppingCondition handler class which will be called after each step to determine if the task is completed.
-    
-    
+
+
     Tool Use
     --------
     Each added tool must have a corresponding class method that can be invoked during :func:`step()` if the GPT calls it.
@@ -43,7 +42,16 @@ class Agent(_Agent):
     This is still quite experimental, but the intended usecase is for reflection / refinement applications.
     """
 
-    def __init__(self, stopping_condition, model_name = None, provider = None, tools = None, callbacks = None, oai_kwargs = None, **fmt_kwargs):
+    def __init__(
+        self,
+        stopping_condition,
+        model_name=None,
+        provider=None,
+        tools=None,
+        callbacks=None,
+        oai_kwargs=None,
+        **fmt_kwargs,
+    ):
         """
         Base Agent class
 
@@ -63,7 +71,7 @@ class Agent(_Agent):
             self.provider = AzureOpenAIProvider(model_name=model_name)
         else:
             self.provider = provider
-        
+
         # Handle Tools
         self.TOOLS = getattr(self, "TOOLS", [])
 
@@ -80,7 +88,7 @@ class Agent(_Agent):
             self.CALLBACKS.extend(callbacks)
 
         self.oai_kwargs = oai_kwargs if oai_kwargs is not None else {}
-        
+
         if len(self.TOOLS):
             self.oai_kwargs.update({"tools": self.TOOLS})
 
@@ -133,42 +141,14 @@ class Agent(_Agent):
 
         # Send off messages for reply
         self.scratchpad += f"=== Step {self.curr_step} ===========\n"
- 
+
         # Attempt to query GPT and handle invalid JSON parsing of args
         response = None
         n_retry = 3
         while response is None and n_retry > 0:
-            try:
-                response = await self.provider.prompt_agent(self, llm_prompt_input, **self.oai_kwargs)
-            except json.decoder.JSONDecodeError as e:
-                if n_retry == 0:
-                    raise e
-                else:
-                    self.scratchpad += "JSONDecodeError in tool call argumement parsing. Retrying.\n"
-                    logger.warning(f"Tool calls in response couldn't be decoded. {n_retry} retries remaining.")
-                    llm_prompt_input.append(
-                        {
-                            "role": "user",
-                            "content": "The arguments to your previous tool call couldn't be parsed correctly. Please ensure you properly escapse quotes and construct a valid JSON payload."
-                        }
-                    )
-                    n_retry -= 1
-                    continue
-            except AssertionError as e:
-                # Agent tries to apply unknown function
-                if n_retry == 0:
-                    raise e
-                else:
-                    self.scratchpad += "Attempted to apply non-function, retrying.\n"
-                    logger.warning(f"Agent attempted to apply undefined function. {n_retry} retries remaining.")
-                    llm_prompt_input.append(
-                            {
-                                "role": "system",
-                                "content": f"You attempted to apply an undefined function, you may only use the following functions as tool calls: {self._known_tools}."
-                            }
-                    )
-                    n_retry -= 1
-                    continue
+            response = await self.provider.prompt_agent(
+                self, llm_prompt_input, **self.oai_kwargs
+            )
         if response is None:
             logger.warning("No response after 3 retries, Terminating!")
             self.truncated = True
@@ -180,7 +160,7 @@ class Agent(_Agent):
             # Recursive call if tool calls in response
             elif response.message.tool_calls is not None:
                 await self._handle_tool_calls(response)
-        
+
         # Conditionally end run and assign answer
         self._check_stop_condition(response)
 
@@ -197,7 +177,7 @@ class Agent(_Agent):
         """
         Simple helper function to clean response text, if desired
         """
-        out = res.strip('\n').strip().replace('\n', '')
+        out = res.strip("\n").strip().replace("\n", "")
         return out
 
     def format_prompt(self) -> str:
@@ -206,11 +186,15 @@ class Agent(_Agent):
         This is usually called within get_next_message() to populate the first user message.
         """
         if len(self.BASE_PROMPT) == 0:
-            raise ValueError("You initialized an Agent with not BASE_PROMPT, please define this attribute with your prompt, optionally adding any formatting args in brackets.")
+            raise ValueError(
+                "You initialized an Agent with not BASE_PROMPT, please define this attribute with your prompt, optionally adding any formatting args in brackets."
+            )
         try:
             out = self.BASE_PROMPT.format(**self.fmt_kwargs)
         except KeyError as err:
-            raise KeyError(f"The following format kwargs were not passed at init time to format the BASE_PROMPT: {err}.")
+            raise KeyError(
+                f"The following format kwargs were not passed at init time to format the BASE_PROMPT: {err}."
+            )
 
         return out
 
@@ -221,58 +205,67 @@ class Agent(_Agent):
         """
         out = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
-            {"role": "system", "content": self.format_prompt()}
+            {"role": "system", "content": self.format_prompt()},
         ]
 
         # If we have existing tool response messages, append them
         if len(self.tool_res_payload):
             out.extend(self.tool_res_payload)
-        
+
         return out
 
     async def _handle_tool_calls(self, response):
         """
         Handle all tool calls in response object
-        
+
         This gets a method within this class by name and evaluates it with the arguments provided by openai.
 
         The output of that method is appended to a new message in the tool_res_payload list, for downstream querying.
         """
-        for tool in response.message.tool_calls:
-            self.scratchpad += "--- Evaluating Toolcalls -----------------\n"
-            # Try to call tool, if present, else raise.
-            try:
-                fun : Callable = getattr(self, tool.function.name)
-                # OpenAI returns as str, which should hopefully eval to dict
-                kwargs : dict[str, any] = tool.function.arguments
+        # Guarding
+        if response.message.tool_calls is None:
+            return None
 
-                # Handle case where we've defined an async coroutine
-                if iscoroutinefunction(fun):
-                    tool_result = await fun(**kwargs)
+        self.scratchpad += "--- Evaluating Toolcalls -----------------\n"
+
+        # Run all awaitables
+        tool_calls = [
+            self.provider.tool_call_wrapper(self, tool)
+            for tool in response.message.tool_calls
+        ]
+        tool_call_tasks = [tool_call() for tool_call in tool_calls]
+
+        tool_call_results = await asyncio.gather(
+            *tool_call_tasks, return_exceptions=True
+        )
+
+        # We might have handled all the calls before we ever dispatched, so only proceed if there were
+        # tasks to check
+        if len(tool_call_results):
+            self.scratchpad += "Tool call results:\n\n"
+            for payload, result in zip(tool_calls, tool_call_results):
+                # Log it
+                toolcall_str = f"{payload.func_name}({str(payload.kwargs)[:100] + '...(trunc)' if len(str(payload.kwargs)) > 100 else str(payload.kwargs)})"
+                logger.info(f"Got tool call: {toolcall_str}")
+                self.scratchpad += f"\t=> {toolcall_str}\n"
+                self.scratchpad += "\t\t"
+
+                # Check if a task errored and raise if so
+                if isinstance(result, BaseException):
+                    self.scratchpad += str(result)
+                    raise result
                 else:
-                    tool_result = fun(**kwargs)
+                    self.tool_res_payload.append(result)
 
-                self.scratchpad += f"\t=> {tool.function.name}()\n"
-                self.scratchpad += tool_result if type(tool_result) == str else repr(tool_result) + "\n\n"
+                    self.scratchpad += "\t\t"
+                    self.scratchpad += (
+                        result["content"]
+                        if isinstance(result["content"], str)
+                        else repr(result["content"])
+                    )
+                    self.scratchpad += "\n\n"
 
-            except ValidationError as err:
-                # CASE: Tool call was a pydantic BaseModel and it failed validation
-                # We'd want to send error back to model to correct as opposed to raising
-                logger.warning(f"Response didn't pass pydantic validation.")
-                tool_result = str(err)
-            except Exception as e:
-                # Else, raise and fail.
-                logger.error(f"Tool call {tool.function.name} failed.")
-                raise e
-                
-            self.tool_res_payload.append(
-                {
-                    "tool_call_id": tool.id,
-                    "role": "tool",
-                    "content": tool_result
-                }
-            )
-            self.scratchpad += "---------------------------------\n\n"
+        self.scratchpad += "---------------------------------\n\n"
 
     def reset(self) -> None:
         """
@@ -300,13 +293,13 @@ class Agent(_Agent):
         """
         payload = []
         for obj in dir(self):
-            if (
-                callable(getattr(self, obj))
-                and len(getattr(getattr(self, obj), "agent_tool_payload", []))
+            if callable(getattr(self, obj)) and len(
+                getattr(getattr(self, obj), "agent_tool_payload", [])
             ):
                 payload.append(getattr(getattr(self, obj), "agent_tool_payload"))
 
         return payload
+
 
 class StructuredOutputAgent(Agent):
     """
@@ -314,10 +307,21 @@ class StructuredOutputAgent(Agent):
 
     A class method is constructed at runtime along with a stopping condition which triggers when a `response_model` object is detected in the response.
     """
-    answer: dict[str, Any]
-    _response_model_warn : bool = True
 
-    def __init__(self, response_model: type[BaseModel], model_name: Optional[str] = None, stopping_condition=None, provider=None, tools=None, callbacks=None, oai_kwargs=None, **fmt_kwargs):
+    answer: dict[str, Any]
+    _response_model_warn: bool = True
+
+    def __init__(
+        self,
+        response_model: type[BaseModel],
+        model_name: Optional[str] = None,
+        stopping_condition=None,
+        provider=None,
+        tools=None,
+        callbacks=None,
+        oai_kwargs=None,
+        **fmt_kwargs,
+    ):
         """
         Language Agent with structured output
 
@@ -332,16 +336,18 @@ class StructuredOutputAgent(Agent):
         :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
         :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
         :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
-        
+
         """
         self.response_model = response_model
         self.output_len = len(self.response_model.model_fields)
-        
+
         if stopping_condition is None:
             stopping_condition = StopOnDataModel(response_model)
         elif stopping_condition is not None and self._response_model_warn:
-            logger.warning("StructuredOutputAgent assumes a `StopOnBaseModel` stopping condition, but you passed another at runtime which will take precedence. This may lead to errors. This warning will only be displayed once per session.")
-            StructuredOutputAgent._response_model_warn = False # Once per session
+            logger.warning(
+                "StructuredOutputAgent assumes a `StopOnBaseModel` stopping condition, but you passed another at runtime which will take precedence. This may lead to errors. This warning will only be displayed once per session."
+            )
+            StructuredOutputAgent._response_model_warn = False  # Once per session
         else:
             pass
 
@@ -355,7 +361,7 @@ class StructuredOutputAgent(Agent):
         else:
             tools_internal = [oai_tool]
 
-        # Assign a class method 
+        # Assign a class method
         fun_name = oai_tool["function"]["name"]
         setattr(self, fun_name, self.response_model)
 
@@ -366,9 +372,9 @@ class StructuredOutputAgent(Agent):
             tools=tools_internal,
             callbacks=callbacks,
             oai_kwargs=oai_kwargs,
-            **fmt_kwargs
+            **fmt_kwargs,
         )
-    
+
     def reset(self) -> None:
         """
         Reset agent state for a re-run

@@ -1,0 +1,5 @@
+[run]
+source = 
+    agents/agent
+    agents/providers
+    agents

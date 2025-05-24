@@ -7,14 +7,22 @@ Sean Browning
 
 import functools
 import inspect
-from types import NoneType
+
+try:
+    from types import NoneType as TypeNone
+except ImportError:
+    # Fix: py3.9
+    TypeNone = type(None)  # type: ignore
+
 from typing import (
     Any,
+    TypedDict,
     Callable,
     Dict,
     List,
     Literal,
     Union,
+    Optional,
     get_args,
     get_origin,
     get_type_hints,
@@ -27,11 +35,43 @@ PYTHON_TO_OAI_SCHEMA = {
     bool: "boolean",
     List: "array",
     Dict: "object",
-    NoneType: "null",
+    TypeNone: "null",
 }
 
+__all__ = ["agent_callable", "async_agent_callable"]
 
-def arg_to_oai_type(arg: Any) -> Dict[str, Any]:
+ToolParameterType = Literal[
+    "string", "integer", "number", "boolean", "array", "null", "object", "any"
+]
+
+
+class ToolParameterProperties(TypedDict, total=False):
+    type: Union[ToolParameterType, List[ToolParameterType]]
+    description: str
+    enum: List[Any]
+    items: "ToolParameterProperties"
+
+
+class ToolParameters(TypedDict):
+    type: Literal["object"]
+    properties: Dict[str, ToolParameterProperties]
+    required: List[str]
+    additionalProperties: bool
+
+
+class ToolFunction(TypedDict):
+    name: str
+    description: Optional[str]
+    parameters: ToolParameters
+    strict: bool
+
+
+class ToolDefinition(TypedDict):
+    type: Literal["function"]
+    function: ToolFunction
+
+
+def arg_to_oai_type(arg: Any) -> ToolParameterProperties:
     """
     Converting Python type hint to OpenAI type for JSON payload.
 
@@ -47,7 +87,7 @@ def arg_to_oai_type(arg: Any) -> Dict[str, Any]:
 
     if origin is list or origin is List:
         item_type = arg_to_oai_type(args[0]) if args else {"type": "any"}
-        return {"type": "array", "items": item_type}
+        return {"type": "array", "items": item_type}  # type: ignore
     elif origin is dict or origin is Dict:
         return {"type": "object"}
     elif origin is Literal:
@@ -61,15 +101,15 @@ def arg_to_oai_type(arg: Any) -> Dict[str, Any]:
             for key, value in union_type.items():
                 if key in out:
                     if isinstance(out[key], list):
-                        out[key].append(value)
-                    else:
-                        out[key] = [out[key], value]
+                        out[key].append(value)  # type: ignore
+                    elif isinstance(out[key], str):
+                        out[key] = [out[key], value]  # type: ignore
                 else:
-                    out[key] = value
+                    out[key] = value  # type: ignore
 
-        return out
+        return out  # type: ignore
     elif arg in PYTHON_TO_OAI_SCHEMA:
-        return {"type": PYTHON_TO_OAI_SCHEMA[arg]}
+        return {"type": PYTHON_TO_OAI_SCHEMA[arg]}  # type: ignore
     else:
         raise KeyError(
             "Type {} is not an interpretable type for OpenAI.".format(str(arg))
@@ -78,7 +118,7 @@ def arg_to_oai_type(arg: Any) -> Dict[str, Any]:
 
 def generate_tool_json_payload(
     func: Callable, description: str, variable_description: Dict[str, str]
-) -> Dict[str, Any]:
+) -> ToolDefinition:
     """
     Internal function used to generate OpenAI Function Calling JSON payload from function type hints.
 
@@ -110,7 +150,7 @@ def generate_tool_json_payload(
             )
         )
 
-    tool_json = {
+    tool_json: ToolDefinition = {
         "type": "function",
         "function": {
             "name": func.__name__,
@@ -147,7 +187,6 @@ def agent_callable(description: str, variable_description: dict[str, str]):
     """
 
     def agent_callable_wrapper(func: Callable):
-
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             result = func(*args, **kwargs)
@@ -164,6 +203,7 @@ def agent_callable(description: str, variable_description: dict[str, str]):
 
     return agent_callable_wrapper
 
+
 def async_agent_callable(description: str, variable_description: dict[str, str]):
     """
     Marks a coroutine as accessible to a language agent
@@ -175,7 +215,6 @@ def async_agent_callable(description: str, variable_description: dict[str, str])
     """
 
     def agent_callable_wrapper(func: Callable):
-
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
             result = await func(*args, **kwargs)
