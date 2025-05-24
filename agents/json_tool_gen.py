@@ -9,18 +9,20 @@ import functools
 import inspect
 
 try:
-    from types import NoneType
+    from types import NoneType as TypeNone
 except ImportError:
     # Fix: py3.9
-    NoneType = type(None)
+    TypeNone = type(None)  # type: ignore
 
 from typing import (
     Any,
+    TypedDict,
     Callable,
     Dict,
     List,
     Literal,
     Union,
+    Optional,
     get_args,
     get_origin,
     get_type_hints,
@@ -33,13 +35,43 @@ PYTHON_TO_OAI_SCHEMA = {
     bool: "boolean",
     List: "array",
     Dict: "object",
-    NoneType: "null",
+    TypeNone: "null",
 }
 
 __all__ = ["agent_callable", "async_agent_callable"]
 
+ToolParameterType = Literal[
+    "string", "integer", "number", "boolean", "array", "null", "object", "any"
+]
 
-def arg_to_oai_type(arg: Any):
+
+class ToolParameterProperties(TypedDict, total=False):
+    type: Union[ToolParameterType, List[ToolParameterType]]
+    description: str
+    enum: List[Any]
+    items: "ToolParameterProperties"
+
+
+class ToolParameters(TypedDict):
+    type: Literal["object"]
+    properties: Dict[str, ToolParameterProperties]
+    required: List[str]
+    additionalProperties: bool
+
+
+class ToolFunction(TypedDict):
+    name: str
+    description: Optional[str]
+    parameters: ToolParameters
+    strict: bool
+
+
+class ToolDefinition(TypedDict):
+    type: Literal["function"]
+    function: ToolFunction
+
+
+def arg_to_oai_type(arg: Any) -> ToolParameterProperties:
     """
     Converting Python type hint to OpenAI type for JSON payload.
 
@@ -55,7 +87,7 @@ def arg_to_oai_type(arg: Any):
 
     if origin is list or origin is List:
         item_type = arg_to_oai_type(args[0]) if args else {"type": "any"}
-        return {"type": "array", "items": item_type}
+        return {"type": "array", "items": item_type}  # type: ignore
     elif origin is dict or origin is Dict:
         return {"type": "object"}
     elif origin is Literal:
@@ -73,11 +105,11 @@ def arg_to_oai_type(arg: Any):
                     elif isinstance(out[key], str):
                         out[key] = [out[key], value]  # type: ignore
                 else:
-                    out[key] = value
+                    out[key] = value  # type: ignore
 
-        return out
+        return out  # type: ignore
     elif arg in PYTHON_TO_OAI_SCHEMA:
-        return {"type": PYTHON_TO_OAI_SCHEMA[arg]}
+        return {"type": PYTHON_TO_OAI_SCHEMA[arg]}  # type: ignore
     else:
         raise KeyError(
             "Type {} is not an interpretable type for OpenAI.".format(str(arg))
@@ -86,7 +118,7 @@ def arg_to_oai_type(arg: Any):
 
 def generate_tool_json_payload(
     func: Callable, description: str, variable_description: Dict[str, str]
-) -> Dict[str, Any]:
+) -> ToolDefinition:
     """
     Internal function used to generate OpenAI Function Calling JSON payload from function type hints.
 
@@ -118,7 +150,7 @@ def generate_tool_json_payload(
             )
         )
 
-    tool_json = {
+    tool_json: ToolDefinition = {
         "type": "function",
         "function": {
             "name": func.__name__,
