@@ -20,7 +20,7 @@ class PredictionAgent(StructuredOutputAgent):
 
     This is a subclass to StructuredOutputAgent, and is provided for convenience
     when output is limited to a set of labels, thus the response model can be built on the fly.
-    
+
     The result from the agent should be a `dict[str, list]` with one element, "labels", of `len(df.height)`
     """
 
@@ -34,12 +34,12 @@ class PredictionAgent(StructuredOutputAgent):
         tools: Optional[List[dict]] = None,
         callbacks: Optional[List[Callable]] = None,
         oai_kwargs: Optional[dict[str, Any]] = None,
-        **fmt_kwargs
+        **fmt_kwargs,
     ):
         """
         A language agent which returns a structured prediction given a set of choices in `labels`.
-        
-        
+
+
         :param labels: The set of categorical labels the model can choose from
         :param int expected_len: Optional length constraint on the response_model (OpenAI API doesn't allow maxItems parameter in schema so this is checked post-hoc in the Pydantic BaseModel)
         :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task (optional)
@@ -61,23 +61,31 @@ class PredictionAgent(StructuredOutputAgent):
             tools=tools,
             callbacks=callbacks,
             oai_kwargs=oai_kwargs,
-            **fmt_kwargs
+            **fmt_kwargs,
         )
 
-    def _build_pydantic_model(self, length_constraint: Optional[int] = None) -> type[pydantic.BaseModel]:
+    def _build_pydantic_model(
+        self, length_constraint: Optional[int] = None
+    ) -> type[pydantic.BaseModel]:
         """
         Construct a pydantic model that we'll use to force the LLM to return a structured response
         """
+
         class classify(pydantic.BaseModel):
-            labels: List[Literal[tuple(self.labels)]] = pydantic.Field(description="Classify the input data into one of the possible categories")
+            labels: List[Literal[tuple(self.labels)]] = pydantic.Field(
+                description="Classify the input data into one of the possible categories"
+            )
+
             @pydantic.model_validator(mode="after")
             def check_len(self):
                 """
                 Possibly check len
                 """
                 if length_constraint and len(self.labels) != length_constraint:
-                    raise ValueError(f"Expected labels to be of length {length_constraint} but got {len(self.labels)}")
-                
+                    raise ValueError(
+                        f"Expected labels to be of length {length_constraint} but got {len(self.labels)}"
+                    )
+
                 return self
 
         return classify
@@ -91,14 +99,21 @@ class PredictionAgentWithJustification(PredictionAgent):
 
     This has the additional stipulation that the number of labels and justifications must agree in number, which is enforced by pydantic post-hoc.
     """
+
     def _build_pydantic_model(self, length_constraint: Optional[int] = None):
         """
         Construct a pydantic model that we'll use to force the LLM to return a structured response.
         This will also include a justification for the classification.
         """
+
         class classify(pydantic.BaseModel):
-            labels : List[Literal[tuple(self.labels)]] = pydantic.Field(description="Classify the input data into one of the possible categories")
-            justification : List[str] = pydantic.Field(description="SHORT description explaining your reasoning for the classfication")
+            labels: List[Literal[tuple(self.labels)]] = pydantic.Field(
+                description="Classify the input data into one of the possible categories"
+            )
+            justification: List[str] = pydantic.Field(
+                description="SHORT description explaining your reasoning for the classfication"
+            )
+
             @pydantic.model_validator(mode="after")
             def check_len(self):
                 """
@@ -106,10 +121,14 @@ class PredictionAgentWithJustification(PredictionAgent):
                 (and optionally that they match length constraint, if passed)
                 """
                 if len(self.justification) != len(self.labels):
-                    raise ValueError(f"There should be a justfication for each label assigned, but the counts differed: (labels: {len(self.labels)}, justifications: {len(self.justification)})")
+                    raise ValueError(
+                        f"There should be a justfication for each label assigned, but the counts differed: (labels: {len(self.labels)}, justifications: {len(self.justification)})"
+                    )
                 if length_constraint and len(self.justification) != length_constraint:
-                    raise ValueError(f"Expected exactly {length_constraint} labels and justifications, but got: (labels: {len(self.labels)}, justifications: {len(self.justification)})")
-                
+                    raise ValueError(
+                        f"Expected exactly {length_constraint} labels and justifications, but got: (labels: {len(self.labels)}, justifications: {len(self.justification)})"
+                    )
+
                 return self
 
         return classify

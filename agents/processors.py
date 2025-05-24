@@ -19,11 +19,21 @@ class _BatchProcessor(metaclass=ABCMeta):
     A virtual class for a processor that maps over a large iterable
     where 1 output is expected for every 1 input
     """
-    def __init__(self, data: Iterable, agent_class: type[Agent], provider: Optional[Type[_Provider]], batch_size: int = 5, n_workers : int = 1, n_retry : int = 5, **kwargs):
+
+    def __init__(
+        self,
+        data: Iterable,
+        agent_class: type[Agent],
+        provider: Optional[Type[_Provider]],
+        batch_size: int = 5,
+        n_workers: int = 1,
+        n_retry: int = 5,
+        **kwargs,
+    ):
         """
         A Processor which operates on chunks of an Iterable.
         Each chunk must be independent, as state will not be maintained between agent calls.
-        
+
         :param Iterable data: An object which will be split into chunks of `batch_size` and passed as-is to `agent_class`
         :param Agent agent_class: An uninitialized class which will be used to process the batches of `data` (which it takes as a named argument, `batch`, for formatting)
         :param _Provider provider: Optionally, an initialized LLM provider to use with the processor
@@ -44,15 +54,19 @@ class _BatchProcessor(metaclass=ABCMeta):
         else:
             # Default to AzureOpenAI
             try:
-                self.provider = AzureOpenAIProvider(model_name=kwargs["model_name"], interactive=True)
+                self.provider = AzureOpenAIProvider(
+                    model_name=kwargs["model_name"], interactive=True
+                )
             except KeyError:
-                raise RuntimeError("If `provider` is not passed, `model_name` must be passed to initialize one!")
-        
+                raise RuntimeError(
+                    "If `provider` is not passed, `model_name` must be passed to initialize one!"
+                )
+
         # Parallel queues
         #                                idx, retries remaining, batch
-        self.in_q : asyncio.PriorityQueue[Tuple[int, int, Any]] = asyncio.PriorityQueue()
+        self.in_q: asyncio.PriorityQueue[Tuple[int, int, Any]] = asyncio.PriorityQueue()
         #                                        idx, response
-        self.out_q : asyncio.PriorityQueue[Tuple[int, Any]] = asyncio.PriorityQueue()
+        self.out_q: asyncio.PriorityQueue[Tuple[int, Any]] = asyncio.PriorityQueue()
 
     def _load_inqueue(self):
         """
@@ -61,7 +75,7 @@ class _BatchProcessor(metaclass=ABCMeta):
         logger.info("Loading Inqueue")
         for i, batch in enumerate(self._iter()):
             self.in_q.put_nowait((i, self.n_retry, batch))
-        
+
         self.error_tasks = 0
 
     @staticmethod
@@ -93,35 +107,44 @@ class _BatchProcessor(metaclass=ABCMeta):
     async def process(self):
         """
         Process all samples from input data using language agent, splitting by chunk size specified at init
-        
+
         :return Iterable: The predicted values after mapping over the input iterable (also stored in self.predicted)
         """
         # Either the workers we called for at init or the number of batches we have to process
         # (whichever is fewer)
         self._load_inqueue()
         n_workers = min(self.n_workers, self.in_q.qsize())
-        logger.info(f"[_process_parallel] processing {self.in_q.qsize()} queries on {n_workers} threads")
+        logger.info(
+            f"[_process_parallel] processing {self.in_q.qsize()} queries on {n_workers} threads"
+        )
 
         self.pbar = tqdm(total=self.in_q.qsize(), desc="Batch Processing", unit="Batch")
         workers = []
 
         for i in range(n_workers):
-            workers.append(asyncio.create_task(self._worker(f"llm_worker-{i}", self.in_q, self.out_q), name=f"llm_worker-{i}"))
-        
+            workers.append(
+                asyncio.create_task(
+                    self._worker(f"llm_worker-{i}", self.in_q, self.out_q),
+                    name=f"llm_worker-{i}",
+                )
+            )
+
         # Wait until the queue is processed
         await self.in_q.join()
 
         # Terminate workers
         for worker in workers:
             worker.cancel()
-        
+
         await asyncio.gather(*workers, return_exceptions=True)
 
         self.pbar.close()
 
         if self.error_tasks > 0:
-            logger.warning(f"[process] There were {self.error_tasks} unsucessful batches!")
-        
+            logger.warning(
+                f"[process] There were {self.error_tasks} unsucessful batches!"
+            )
+
         # De-queue into list from output queue
         out = []
         for _, msg in self.dequeue(self.out_q):
@@ -132,7 +155,12 @@ class _BatchProcessor(metaclass=ABCMeta):
 
         return out
 
-    async def _worker(self, worker_name: str, in_q: asyncio.PriorityQueue, out_q: asyncio.PriorityQueue):
+    async def _worker(
+        self,
+        worker_name: str,
+        in_q: asyncio.PriorityQueue,
+        out_q: asyncio.PriorityQueue,
+    ):
         """
         Agent worker
         """
@@ -144,11 +172,15 @@ class _BatchProcessor(metaclass=ABCMeta):
                 answer = await agent()
 
                 if len(answer) == 0:
-                    logger.error(f"[_worker - {worker_name}]: No answer was provided for query {id}")
+                    logger.error(
+                        f"[_worker - {worker_name}]: No answer was provided for query {id}"
+                    )
                     errored = True
 
             except asyncio.CancelledError:
-                logger.info(f"[_worker - {worker_name}]: Got CancelledError, terminating.")
+                logger.info(
+                    f"[_worker - {worker_name}]: Got CancelledError, terminating."
+                )
                 break
 
             except Exception as e:
@@ -159,16 +191,20 @@ class _BatchProcessor(metaclass=ABCMeta):
                 retry_left -= 1
                 if retry_left < 0:
                     # End retries, fill in data with placeholder
-                    logger.error(f"[_worker - {worker_name}]: Task {id} failed {self.n_retry} times and will not be retried")
+                    logger.error(
+                        f"[_worker - {worker_name}]: Task {id} failed {self.n_retry} times and will not be retried"
+                    )
                     answer = self._placeholder(data)
                     self.error_tasks += 1
                 else:
                     # Send data back to queue to retry processing
-                    logger.info(f"[_worker - {worker_name}]: Task {id} - {retry_left} retries remaining")
+                    logger.info(
+                        f"[_worker - {worker_name}]: Task {id} - {retry_left} retries remaining"
+                    )
                     await in_q.put((id, retry_left, data))
                     in_q.task_done()
                     continue
-            
+
             await out_q.put((id, answer))
             self.pbar.update()
             in_q.task_done()
@@ -190,8 +226,11 @@ class _BatchProcessor(metaclass=ABCMeta):
         :return: An initialized Agent class
         """
         batch_str = self._batch_format(batch)
-        out = self.agent_class(provider=self.provider, **self.agent_kwargs, batch=batch_str, **kwargs) # type: ignore[misc]
+        out = self.agent_class(
+            provider=self.provider, **self.agent_kwargs, batch=batch_str, **kwargs
+        )  # type: ignore[misc]
         return out
+
 
 class BatchProcessor(_BatchProcessor):
     """
@@ -199,6 +238,7 @@ class BatchProcessor(_BatchProcessor):
 
     Each chunk of the iterable is operated on independently.
     """
+
     def _iter(self) -> Iterator:
         """
         Just a backport of itertools.batched
@@ -213,8 +253,13 @@ class BatchProcessor(_BatchProcessor):
         """
         Returns a `List[str]` with `len() == len(batch)`
         """
-        resp_obj = "" if self.agent_class.output_len == 1 else ("", ) * self.agent_class.output_len
+        resp_obj = (
+            ""
+            if self.agent_class.output_len == 1
+            else ("",) * self.agent_class.output_len
+        )
         return [resp_obj] * len(batch)
+
 
 class DFBatchProcessor(_BatchProcessor):
     """
@@ -223,7 +268,8 @@ class DFBatchProcessor(_BatchProcessor):
 
     The main user-facing method after init is :func:`process()`
     """
-    data : pl.DataFrame
+
+    data: pl.DataFrame
 
     def _iter(self) -> Iterator[pl.DataFrame]:
         return self.data.iter_slices(self.batch_size)
@@ -232,9 +278,13 @@ class DFBatchProcessor(_BatchProcessor):
         """
         Returns a List[str] with len() == batch.height
         """
-        resp_obj = "" if self.agent_class.output_len == 1 else ("", ) * self.agent_class.output_len
+        resp_obj = (
+            ""
+            if self.agent_class.output_len == 1
+            else ("",) * self.agent_class.output_len
+        )
         return [resp_obj] * batch.height
-    
+
     @staticmethod
     def _batch_format(batch: pl.DataFrame) -> str:
         """

@@ -18,6 +18,7 @@ class OpenAIToolCall(_ToolCall):
     """
     An encapsulating class for tool calls from an OpenAI lanaguge agent
     """
+
     tool_call: ChatCompletionMessageToolCall
 
     @property
@@ -33,7 +34,9 @@ class OpenAIToolCall(_ToolCall):
         return self.tool_call.function.arguments
 
     @staticmethod
-    def _construct_return_message(id: str, response: Union[str, BaseModel]) -> Dict[str, Union[str, BaseModel]]:
+    def _construct_return_message(
+        id: str, response: Union[str, BaseModel]
+    ) -> Dict[str, Union[str, BaseModel]]:
         return {"tool_call_id": id, "role": "tool", "content": response}
 
 

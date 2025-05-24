@@ -1,6 +1,7 @@
 """
 All abstract classes
 """
+
 import abc
 import json
 import logging
@@ -15,6 +16,7 @@ from openai.types.chat.chat_completion import Choice
 from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class _ToolCall(metaclass=abc.ABCMeta):
@@ -31,9 +33,10 @@ class _ToolCall(metaclass=abc.ABCMeta):
     - _construct_return_message(): A function which returns the tool call result as a message payload for the langauge agent
 
     """
+
     "Agent instance calling the tool"
-    agent: '_Agent'
-    
+    agent: "_Agent"
+
     "The tool call object containing the tool id, name, and args"
     tool_call: Any
 
@@ -42,10 +45,10 @@ class _ToolCall(metaclass=abc.ABCMeta):
 
     "Named arguments passed to `func`"
     kwargs: Dict[str, Any] = field(default_factory=dict, init=False)
-    
+
     "Any errors to be returned to the agent (failure to retrieve function or parse args, etc)"
     errors: Optional[str] = field(init=False, default=None)
-    
+
     "An asyncio task running the tool call"
     task: Optional[Task] = field(init=False, default=None)
 
@@ -57,7 +60,7 @@ class _ToolCall(metaclass=abc.ABCMeta):
         which will be used to compose the return message
         """
         raise NotImplementedError()
-    
+
     @property
     @abc.abstractmethod
     def func_name(self) -> str:
@@ -78,14 +81,16 @@ class _ToolCall(metaclass=abc.ABCMeta):
 
     @staticmethod
     @abc.abstractmethod
-    def _construct_return_message(id: str, respose: Union[str, BaseModel]) -> Dict[str, Union[str, BaseModel]]:
+    def _construct_return_message(
+        id: str, respose: Union[str, BaseModel]
+    ) -> Dict[str, Union[str, BaseModel]]:
         """
         A function that constructs the provider-appropriate return message for the tool call.
 
         Args:
             id (str): A tool call ID that the language uses to keep track of responses internally
             response (str | BaseModel): The response to the requested tool call to return to the model
-        
+
         Returns:
             out (Dict[str, str | BaseModel]): A properly formatted message payload with the output of the tool call for the language agent to handle
         """
@@ -131,7 +136,7 @@ class _ToolCall(metaclass=abc.ABCMeta):
                 f"Tool call {self.func_name} in response couldn't be decoded: {str(e)}"
             )
             self.errors = "The arguments to your previous tool call couldn't be parsed correctly. Please ensure you properly escapse quotes and construct a valid JSON payload."
-    
+
     def __call__(self) -> Task[Dict[str, Union[str, BaseModel]]]:
         """
         Return async task to gather later
@@ -141,7 +146,7 @@ class _ToolCall(metaclass=abc.ABCMeta):
         if self.task is None:
             self.task = create_task(self.handler(), name=self.id)
         return self.task
-    
+
     async def handler(self) -> Dict[str, Union[str, BaseModel]]:
         """
         A handler coroutine that wraps a tool call, either awaiting it if it's also a co-routine, or sending
@@ -172,6 +177,7 @@ class _ToolCall(metaclass=abc.ABCMeta):
 
         return self._construct_return_message(self.id, res)
 
+
 class _Provider(metaclass=abc.ABCMeta):
     """
     A LLM Provider which should provide the standard methods for prompting and agent
@@ -179,7 +185,7 @@ class _Provider(metaclass=abc.ABCMeta):
     """
 
     "The tool_call class specific to this provider that will be used to evaluate any tool calls from the model"
-    tool_call_wrapper : Type[_ToolCall]
+    tool_call_wrapper: Type[_ToolCall]
 
     def __init__(self, model_name: str, **kwargs):
         pass
@@ -189,8 +195,9 @@ class _Provider(metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    async def prompt_agent(self, ag: '_Agent', prompt: list[dict[str, str]], **kwargs):
+    async def prompt_agent(self, ag: "_Agent", prompt: list[dict[str, str]], **kwargs):
         pass
+
 
 class _StoppingCondition(metaclass=abc.ABCMeta):
     """
@@ -199,9 +206,11 @@ class _StoppingCondition(metaclass=abc.ABCMeta):
 
     The main call should always return the final answer, if we've finished the run, or None otherwise
     """
+
     @abc.abstractmethod
-    def __call__(self, cls: '_Agent', response: Choice) -> Optional[Any]:
+    def __call__(self, cls: "_Agent", response: Choice) -> Optional[Any]:
         raise NotImplementedError()
+
 
 class _Agent(metaclass=abc.ABCMeta):
     terminated: bool = False
@@ -212,9 +221,9 @@ class _Agent(metaclass=abc.ABCMeta):
     answer: Any = ""
     BASE_PROMPT: str = ""
     SYSTEM_PROMPT: str = ""
-    oai_kwargs : dict
-    TOOLS : list
-    CALLBACKS : list
+    oai_kwargs: dict
+    TOOLS: list
+    CALLBACKS: list
     callback_output: list
     tool_res_payload: list[dict]
     provider: _Provider
@@ -227,10 +236,10 @@ class _Agent(metaclass=abc.ABCMeta):
         tools: Optional[List[dict]] = None,
         callbacks: Optional[List[Callable]] = None,
         oai_kwargs: Optional[dict[str, Any]] = None,
-        **fmt_kwargs
+        **fmt_kwargs,
     ):
         pass
-    
+
     @abc.abstractmethod
     async def step(self):
         """

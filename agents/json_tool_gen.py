@@ -36,7 +36,8 @@ PYTHON_TO_OAI_SCHEMA = {
     NoneType: "null",
 }
 
-__all__ = ['agent_callable', 'async_agent_callable']
+__all__ = ["agent_callable", "async_agent_callable"]
+
 
 def arg_to_oai_type(arg: Any):
     """
@@ -68,9 +69,9 @@ def arg_to_oai_type(arg: Any):
             for key, value in union_type.items():
                 if key in out:
                     if isinstance(out[key], list):
-                        out[key].append(value) # type: ignore
+                        out[key].append(value)  # type: ignore
                     elif isinstance(out[key], str):
-                        out[key] = [out[key], value] # type: ignore
+                        out[key] = [out[key], value]  # type: ignore
                 else:
                     out[key] = value
 
@@ -154,7 +155,6 @@ def agent_callable(description: str, variable_description: dict[str, str]):
     """
 
     def agent_callable_wrapper(func: Callable):
-
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             result = func(*args, **kwargs)
@@ -171,6 +171,7 @@ def agent_callable(description: str, variable_description: dict[str, str]):
 
     return agent_callable_wrapper
 
+
 def async_agent_callable(description: str, variable_description: dict[str, str]):
     """
     Marks a coroutine as accessible to a language agent
@@ -182,7 +183,6 @@ def async_agent_callable(description: str, variable_description: dict[str, str])
     """
 
     def agent_callable_wrapper(func: Callable):
-
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
             result = await func(*args, **kwargs)

@@ -12,6 +12,7 @@ from ..tools import OpenAIToolCall
 
 logger = logging.getLogger(__name__)
 
+
 class AzureOpenAIProvider(_Provider):
     """
     An Azure OpenAI Provider for language Agents.
@@ -24,11 +25,12 @@ class AzureOpenAIProvider(_Provider):
     - azure_endpoint or AZURE_OPENAI_ENDPOINT
 
     AZURE_OPENAI_API_KEY will be assigned via authentication (either by ClientSecret or Interactive AD Auth depending on `interactive`)
-    
+
     :param str model_name: Model name from the deployments list to use
     :param bool interactive: Should authentication use an Interactive AD Login (T), or ClientSecret (F)?
     :param **kwargs: Any additional kw-args for AsyncAzureOpenAI
     """
+
     tool_call_wrapper = OpenAIToolCall
 
     def __init__(self, model_name: str, interactive: bool, **kwargs):
@@ -45,24 +47,30 @@ class AzureOpenAIProvider(_Provider):
         :returns: API key assigned to `AZURE_OPENAI_API_KEY` and `OPENAI_API_KEY` environ variables
         """
         credential: Union[InteractiveBrowserCredential, ClientSecretCredential]
-        
+
         if self.interactive:
             credential = InteractiveBrowserCredential()
         else:
             credential = ClientSecretCredential(
                 tenant_id=os.environ["SP_TENANT_ID"],
                 client_id=os.environ["SP_CLIENT_ID"],
-                client_secret=os.environ["SP_CLIENT_SECRET"]
+                client_secret=os.environ["SP_CLIENT_SECRET"],
             )
 
-        os.environ["AZURE_OPENAI_API_KEY"] = credential.get_token("https://cognitiveservices.azure.com/.default").token
+        os.environ["AZURE_OPENAI_API_KEY"] = credential.get_token(
+            "https://cognitiveservices.azure.com/.default"
+        ).token
         os.environ["OPENAI_API_KEY"] = os.environ["AZURE_OPENAI_API_KEY"]
 
         if getattr(self, "llm", None) is not None:
             self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
 
-    @backoff.on_exception(backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3)
-    async def prompt_agent(self, ag: Type[_Agent], prompt: List[dict[str, str]], **kwargs):
+    @backoff.on_exception(
+        backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3
+    )
+    async def prompt_agent(
+        self, ag: Type[_Agent], prompt: List[dict[str, str]], **kwargs
+    ):
         """
         An async version of the main OAI prompting logic.
 
@@ -79,13 +87,16 @@ class AzureOpenAIProvider(_Provider):
             prompt = [prompt]
 
         ag.scratchpad += "--- Input ---------------------------\n"
-        ag.scratchpad += "\n".join(msg["content"] for msg in prompt if not isinstance(msg, ChatCompletionMessage))
+        ag.scratchpad += "\n".join(
+            msg["content"]
+            for msg in prompt
+            if not isinstance(msg, ChatCompletionMessage)
+        )
         ag.scratchpad += "\n-----------------------------------\n"
-    
+
         try:
             res = await self.llm.chat.completions.create(
-                messages=prompt, model=self.model_name,
-                **kwargs
+                messages=prompt, model=self.model_name, **kwargs
             )
         except openai.AuthenticationError as e:
             logger.info("Auth failed, attempting to re-authenticate before retrying")
@@ -105,31 +116,37 @@ class AzureOpenAIProvider(_Provider):
         if len(ag.TOOLS):
             # attempt to parse tool call arguments
             # BUG: OpenAI sometimes doesn't return a "tool_calls" reason and uses "stop" instead. Annoying.
-            if out.finish_reason == "tool_calls" or (out.finish_reason == "stop" and len(out.message.tool_calls)):
+            if out.finish_reason == "tool_calls" or (
+                out.finish_reason == "stop" and len(out.message.tool_calls)
+            ):
                 out.finish_reason = "tool_calls"
                 # Append GPT response to next payload
                 # NOTE: This has to come before the next step of parsing
                 ag.tool_res_payload.append(out.message)
-        
+
         ag.scratchpad += "\n-----------------------------------\n"
         logger.info(f"Received response: {out.message.content}")
 
         if out.finish_reason == "length":
             ag.truncated = True
-            ag.scratchpad += "Response returned truncated from OpenAI due to token length.\n"
+            ag.scratchpad += (
+                "Response returned truncated from OpenAI due to token length.\n"
+            )
             logger.warning("Message returned truncated.")
         return out
-    
+
+
 class OpenAIProvider(AzureOpenAIProvider):
     """
     Standard (non-Azure) OpenAI provider
 
     Requires `api_key` passed as a kwarg, or OPENAI_API_KEY set as an environment variable
     """
+
     def __init__(self, model_name: str, **kwargs):
         self.model_name = model_name
         self.authenticate()
         self.llm = openai.AsyncOpenAI(**kwargs)
-    
+
     def authenticate(self):
         pass

@@ -11,6 +11,7 @@ class _Callback(metaclass=abc.ABCMeta):
     """
     A Callback virtual class
     """
+
     @abc.abstractmethod
     def __call__(self, cls: type[Agent], answer: str, scratchpad: str):
         """
@@ -28,6 +29,7 @@ class AgentCallback(_Callback):
     """
     Call another agent with the answer and scratchpad of a completed agent
     """
+
     def __init__(self, agent_class: type[Agent], **agent_kwargs):
         """
         Create an Agent Callback, i.e. an Agent which will be called at the
@@ -35,7 +37,7 @@ class AgentCallback(_Callback):
 
         The provided `agent_class` will be initialized at the end of the run with
         `answer` and `scratchpad` variables passed to format the `BASE_PROMPT`
-        
+
         Possible use cases could include reflection/reaction on llm agent feedback,
         summarization of task, etc.
 
@@ -50,7 +52,8 @@ class AgentCallback(_Callback):
         Run new callback agent on calling agent's answer and scratchpad and append output.
         """
 
-        self.callback_agent = self.agent_class(**self.agent_kwargs, answer=answer, scratchpad=scratchpad)
+        self.callback_agent = self.agent_class(
+            **self.agent_kwargs, answer=answer, scratchpad=scratchpad
+        )
         await self.callback_agent.run()
         cls.callback_output.append(self.callback_agent.answer)
-
