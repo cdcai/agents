@@ -7,7 +7,13 @@ Sean Browning
 
 import functools
 import inspect
-from types import NoneType
+
+try:
+    from types import NoneType
+except ImportError:
+    # Fix: py3.9
+    NoneType = type(None)
+
 from typing import (
     Any,
     Callable,
