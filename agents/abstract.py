@@ -78,7 +78,7 @@ class _ToolCall(metaclass=abc.ABCMeta):
 
     @staticmethod
     @abc.abstractmethod
-    def _construct_return_message(id: str, respose: str | BaseModel) -> Dict[str, str | BaseModel]:
+    def _construct_return_message(id: str, respose: Union[str, BaseModel]) -> Dict[str, Union[str, BaseModel]]:
         """
         A function that constructs the provider-appropriate return message for the tool call.
 
@@ -92,7 +92,7 @@ class _ToolCall(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @property
-    def result(self) -> Optional[Dict[str, str | BaseModel]]:
+    def result(self) -> Optional[Dict[str, Union[str, BaseModel]]]:
         """
         Return tool call result, if available
         - calls the result() method on the task
@@ -132,7 +132,7 @@ class _ToolCall(metaclass=abc.ABCMeta):
             )
             self.errors = "The arguments to your previous tool call couldn't be parsed correctly. Please ensure you properly escapse quotes and construct a valid JSON payload."
     
-    def __call__(self) -> Task[Dict[str, str | BaseModel]]:
+    def __call__(self) -> Task[Dict[str, Union[str, BaseModel]]]:
         """
         Return async task to gather later
         - Can only be fired once
@@ -142,7 +142,7 @@ class _ToolCall(metaclass=abc.ABCMeta):
             self.task = create_task(self.handler(), name=self.id)
         return self.task
     
-    async def handler(self) -> Dict[str, str | BaseModel]:
+    async def handler(self) -> Dict[str, Union[str, BaseModel]]:
         """
         A handler coroutine that wraps a tool call, either awaiting it if it's also a co-routine, or sending
         it to a thread to be handled separately if it's sequential.

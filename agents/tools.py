@@ -3,7 +3,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from typing import Dict, Literal
+from typing import Dict, Literal, Union
 
 from openai.types.chat import ChatCompletionMessageToolCall
 from pydantic import BaseModel
@@ -23,7 +23,7 @@ class OpenAIToolCall(_ToolCall):
     @property
     def id(self) -> str:
         return self.tool_call.id
-    
+
     @property
     def func_name(self) -> str:
         return self.tool_call.function.name
@@ -33,7 +33,7 @@ class OpenAIToolCall(_ToolCall):
         return self.tool_call.function.arguments
 
     @staticmethod
-    def _construct_return_message(id: str, response: str | BaseModel) -> Dict[str, str | BaseModel]:
+    def _construct_return_message(id: str, response: Union[str, BaseModel]) -> Dict[str, Union[str, BaseModel]]:
         return {"tool_call_id": id, "role": "tool", "content": response}
 
 
