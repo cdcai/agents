@@ -21,6 +21,7 @@ venv.bak/
 # Logs
 logs/*
 *.log
+main.xml
 
 # Distribution / packaging
 .Python
