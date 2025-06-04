@@ -1,4 +1,6 @@
 # Agents
+[![Test Suite](https://github.com/cdcai/agents/actions/workflows/test.yaml/badge.svg)](https://github.com/cdcai/agents/actions/workflows/test.yaml)  
+
 Sean Browning (NCEZID/OD Data Science Team)
 
 ## Background
