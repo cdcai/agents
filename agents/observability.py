@@ -70,9 +70,26 @@ class ObservableAzureOpenAIProvider(AzureOpenAIProvider, Observable):
     @backoff.on_exception(
         backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3
     )
+    async def _prompt_agent(self, prompt, **kwargs) -> ChatCompletion:
+        try:
+            res = await self.llm.chat.completions.create(
+                messages=prompt, model=self.model_name, **kwargs
+            )
+        except openai.AuthenticationError as e:
+            logger.info("Auth failed, attempting to re-authenticate before retrying")
+            self.authenticate()
+            raise e
+        except Exception as e:
+            # TODO: some error handling here
+            logger.debug(e)
+            raise e
+
+        return res
+
+    # TODO: Figure out a better approach than violating type safety
     async def prompt_agent(
         self,
-        ag: _Agent,
+        ag: "AgentObservable",  # type: ignore[override]
         prompt: Union[List[ChatCompletionMessageParam], ChatCompletionMessageParam],
         **kwargs,
     ):
@@ -97,23 +114,14 @@ class ObservableAzureOpenAIProvider(AzureOpenAIProvider, Observable):
                 ag.scratchpad += "\n" + msg["content"]
         ag.scratchpad += "\n-----------------------------------\n"
 
-        try:
-            res: ChatCompletion = await self.llm.chat.completions.create(
-                messages=prompt, model=self.model_name, **kwargs
-            )
-        except openai.AuthenticationError as e:
-            logger.info("Auth failed, attempting to re-authenticate before retrying")
-            self.authenticate()
-            raise e
-        except Exception as e:
-            # TODO: some error handling here
-            logger.debug(e)
-            raise e
-
+        res = await self._prompt_agent(prompt, **kwargs)
         out = res.choices[0]
 
         if isinstance(res.usage, CompletionUsage):
             self.all_usage.append(res.usage)
+            ag.all_usage.append(res.usage)
+
+        self.round_trips += 1
 
         ag.scratchpad += "--- Output --------------------------\n"
         ag.scratchpad += "Message:\n"
@@ -155,8 +163,8 @@ class AgentObservable(Agent, Observable):
         oai_kwargs=None,
         **fmt_kwargs,
     ):
-        self.usage_list = []
-        self.turns = 0
+        self.all_usage = []
+        self.round_trips = 0
         super().__init__(
             stopping_condition,
             model_name,
@@ -169,5 +177,5 @@ class AgentObservable(Agent, Observable):
 
     async def step(self):
         out = await super().step()
-        self.turns += 1
+        self.round_trips += 1
         return out

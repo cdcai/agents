@@ -189,7 +189,7 @@ class Agent(_Agent):
         """
         if len(self.BASE_PROMPT) == 0:
             raise ValueError(
-                "You initialized an Agent with not BASE_PROMPT, please define this attribute with your prompt, optionally adding any formatting args in brackets."
+                "You initialized an Agent with no BASE_PROMPT, please define this attribute with your prompt, optionally adding any formatting args in brackets."
             )
         try:
             out = self.BASE_PROMPT.format(**self.fmt_kwargs)
