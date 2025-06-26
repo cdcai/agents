@@ -10,13 +10,8 @@ from typing import List, Union
 import backoff
 import openai
 from openai.types import CompletionUsage
-from openai.types.chat import (
-    ChatCompletionMessageParam,
-    ChatCompletion,
-    ChatCompletionMessage,
-)
+from openai.types.chat import ChatCompletionMessageParam, ChatCompletion
 
-from .abstract import _Agent
 from .providers import AzureOpenAIProvider
 from .agent import Agent
 
