@@ -1,12 +1,16 @@
+import asyncio
 import logging
 import os
-from typing import List, Union
+import json
+from typing import List, Union, Tuple, Literal, Dict
+from io import StringIO, BytesIO
 
 import backoff
 import openai
 from azure.identity import ClientSecretCredential, InteractiveBrowserCredential
-from openai.types.chat import ChatCompletionMessageParam
-
+from openai.types.chat import ChatCompletionMessageParam, ChatCompletion
+from openai.types.file_object import FileObject
+from openai.types.batch import Batch
 from ..abstract import _Agent, _Provider
 from ..tools import OpenAIToolCall
 
@@ -33,12 +37,33 @@ class AzureOpenAIProvider(_Provider):
 
     tool_call_wrapper = OpenAIToolCall
     llm: Union[openai.AsyncAzureOpenAI, openai.AsyncOpenAI]
+    batcher_timeout = 2.0
 
-    def __init__(self, model_name: str, interactive: bool, **kwargs):
+    def __init__(
+        self,
+        model_name: str,
+        interactive: bool,
+        mode: Literal["chat", "batch"] = "chat",
+        batch_size: int = 10,
+        **kwargs,
+    ):
         self.model_name = model_name
         self.interactive = interactive
         self.authenticate()
         self.llm = openai.AsyncAzureOpenAI(**kwargs)
+        self.mode = mode
+        self.batch_size = batch_size
+
+        # Monkey-patching depending on selected mode
+        match self.mode:
+            case "chat":
+                self.endpoint_fn = self.llm.chat.completions.create
+            case "batch":
+                self.batch_idx = 1
+                self.endpoint_fn = self.query_batch_mode
+                self.batch_q: asyncio.Queue[Dict] = asyncio.Queue()
+                self.batch_out: Dict[str, ChatCompletion] = {}
+                asyncio.create_task(self._batcher(), name="OpenAIBatchAPIHandler")
 
     def authenticate(self) -> None:
         """
@@ -65,6 +90,180 @@ class AzureOpenAIProvider(_Provider):
 
         if getattr(self, "llm", None) is not None:
             self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
+
+    async def query_batch_mode(
+        self, messages: List[ChatCompletionMessageParam], model: str, **kwargs
+    ) -> ChatCompletion:
+        task_id = f"task-{self.batch_idx}"
+        self.batch_idx += 1
+
+        task = {
+            "custom_id": task_id,
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": {"model": model, **kwargs, "messages": messages},
+        }
+
+        await self.batch_q.put(task)
+
+        task_done = False
+        while not task_done:
+            try:
+                out = self.batch_out.pop(task_id)
+                task_done = True
+                if isinstance(out, Exception):
+                    # Propagate errors if we encountered any
+                    raise out
+            except KeyError:
+                # DEBUG: Remove this when batch size is >>
+                logger.debug(f"Still waiting for batch response [{task_id}]")
+                # Poll every 5s for the response
+                await asyncio.sleep(5)
+                continue
+
+        return out
+
+    async def _batcher(self):
+        """
+        Batch loop
+
+        This is a co-routine that puts all of our messages together into a batch, sends them off,
+        and stores the results back into a dict for the individual agents to handle.
+
+        It's started at init time if we select batch mode, and persists for the duration of the session.
+
+        TODO: Maybe better to break out somehow into a separate handler class to allow for multiple workers
+        to spin up and send off a lot of batches at once. I'm not sure how it works yet.
+        """
+        while True:
+            # Define our batch and start the clock
+            batch = []
+            batch_poll_start = asyncio.get_running_loop().time()
+
+            # Await new messages to load into the batch
+            # - Until we hit our max batch size, or
+            # - Until we've waited for the time indicated (default 2s)
+            while len(batch) <= self.batch_size:
+                time_remaining = self.batcher_timeout - (
+                    asyncio.get_running_loop().time() - batch_poll_start
+                )
+                if time_remaining <= 0.0:
+                    # We've waited long enough, send what we have in a batch
+                    break
+                try:
+                    req = await asyncio.wait_for(self.batch_q.get(), timeout=0.1)
+                    batch.append(req)
+                    self.batch_q.task_done()
+                except asyncio.TimeoutError:
+                    continue
+
+            # Case: Nothing to submit
+            # - Just re-run until we do
+            if len(batch) == 0:
+                continue
+
+            # Otherwise: create our batch payload, send off to OpenAI, and wait for the results
+            batch_file = await self.send_batch(batch)
+            logger.debug(f"Batch file {batch_file.id} sent to OpenAI")
+
+            batch_task = await self.create_batch_task(batch_file)
+
+            # Get results
+            results = await self.get_batch_results(batch_task)
+            
+            # Write out results to dict for agents to pick up
+            for result in results:
+                self.batch_out[result["custom_id"]] = ChatCompletion.model_validate(result["response"]["body"])
+
+    @staticmethod
+    def _create_batch_file(tasks: List[dict]) -> Tuple[str, bytes, str]:
+        """
+        Create a batch file for the OpenAI Batch API
+
+        :param tasks: List of task dictionaries to be sent to OpenAI
+        :return: Tuple containing the file name, file content, and MIME type to send as an API payload
+        """
+
+        with StringIO() as batch_file:
+            for task in tasks:
+                batch_file.write(json.dumps(task) + "\n")
+
+            return (
+                "batch_tasks.jsonl",
+                batch_file.getvalue().encode("utf-8"),
+                "application/json",
+            )
+
+    async def send_batch(
+        self,
+        tasks: List[dict],
+        **kwargs,
+    ) -> FileObject:
+        """
+        Send a batch file to OpenAI pending further processing.
+
+        :param tasks: List of task dictionaries to be sent to OpenAI
+        :param kwargs: Additional keyword arguments for the file upload (see OpenAI API documentation)
+
+        :return: An OpenAI File object representing the uploaded batch file
+        """
+        file_name, file_content, mime_type = self._create_batch_file(tasks)
+        return await self.llm.files.create(
+            file=(file_name, file_content, mime_type), purpose="batch", **kwargs
+        )
+
+    async def create_batch_task(
+        self, batch_file: FileObject, timeout: int = 30, **kwargs
+    ) -> Batch:
+        """
+        Create a batch from an existing batch file object.
+
+        :param FileObject batch_file: An OpenAI File object representing the batch file
+        :param int timeout: polling timeout waiting for response
+        :param kwargs: Additional keyword arguments for the batch creation (see OpenAI API documentation)
+
+        :return: An OpenAI File object representing the created batch
+        """
+        try:
+            logger.info(f"Executing batch task [{batch_file.id}]")
+            batch = await self.llm.batches.create(
+                input_file_id=batch_file.id,
+                endpoint="/v1/chat/completions",
+                completion_window="24h",
+                **kwargs,
+            )
+        except:
+            logger.error(f"Attempt to process batch {batch_file.id} failed!")
+            raise
+
+        while batch.status not in ["completed", "failed"]:
+            logger.info(f"Batch status [{batch.id}]: {batch.status}. Waiting for completion...")
+            batch = await self.llm.batches.retrieve(batch.id)
+            await asyncio.sleep(timeout)
+
+        return batch
+
+    async def get_batch_results(self, batch: Batch) -> List[dict]:
+        """
+        Retrieve the results of a completed batch.
+
+        :param batch: An OpenAI Batch object representing the completed batch
+
+        :return: A list of results from the batch
+        """
+        if batch.status != "completed" or batch.output_file_id is None:
+            raise ValueError("Batch status was not 'completed'! Got: " + batch.status)
+
+        results = []
+        result_stream = await self.llm.files.content(batch.output_file_id)
+
+        with BytesIO() as buffer:
+            buffer.write(result_stream.content)
+            result_text = buffer.getvalue().decode("utf-8")
+            for line in result_text.splitlines():
+                results.append(json.loads(line))
+
+        return results
 
     @backoff.on_exception(
         backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3
@@ -97,7 +296,7 @@ class AzureOpenAIProvider(_Provider):
         ag.scratchpad += "\n-----------------------------------\n"
 
         try:
-            res = await self.llm.chat.completions.create(
+            res = await self.endpoint_fn(
                 messages=prompt, model=self.model_name, **kwargs
             )
         except openai.AuthenticationError as e:
