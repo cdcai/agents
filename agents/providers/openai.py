@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import json
-from typing import List, Union, Tuple, Literal, Dict
+from typing import List, Union, Tuple, Dict, Optional
 from io import StringIO, BytesIO
 
 import backoff
@@ -11,11 +11,75 @@ from azure.identity import ClientSecretCredential, InteractiveBrowserCredential
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletion
 from openai.types.file_object import FileObject
 from openai.types.batch import Batch
-from ..abstract import _Agent, _Provider
+from ..abstract import _Agent, _Provider, _BatchAPIHelper
 from ..tools import OpenAIToolCall
+
+DEFAULT_BATCH_SIZE = 1000
 
 logger = logging.getLogger(__name__)
 
+class OpenAIBatchAPIHelper(_BatchAPIHelper):
+
+    provider : "AzureOpenAIBatchProvider"
+
+    def __init__(self, batch_size: int):
+        self.batch_size = batch_size
+
+    def register_provider(self, provider: "AzureOpenAIBatchProvider"):
+        """
+        Store provider as an attribute and start up batching task
+        """
+        self.provider = provider
+        self.task = asyncio.create_task(self._batcher(), name="OpenAIBatchHelper")
+
+    async def _batcher(self):
+        """
+        Batch loop
+
+        This is a co-routine that puts all of our messages together into a batch, sends them off,
+        and stores the results back into a dict for the individual agents to handle.
+
+        It's started at init time if we select batch mode, and persists for the duration of the session.
+        """
+        while True:
+            # Define our batch and start the clock
+            batch = []
+            batch_poll_start = asyncio.get_running_loop().time()
+
+            # Await new messages to load into the batch
+            # - Until we hit our max batch size, or
+            # - Until we've waited for the time indicated (default 2s)
+            while len(batch) <= self.batch_size:
+                time_remaining = self.timeout - (
+                    asyncio.get_running_loop().time() - batch_poll_start
+                )
+                if time_remaining <= 0.0:
+                    # We've waited long enough, send what we have in a batch
+                    break
+                try:
+                    req = await asyncio.wait_for(self.provider.batch_q.get(), timeout=0.1)
+                    batch.append(req)
+                    self.provider.batch_q.task_done()
+                except asyncio.TimeoutError:
+                    continue
+
+            # Case: Nothing to submit
+            # - Just re-run until we do
+            if len(batch) == 0:
+                continue
+
+            # Otherwise: create our batch payload, send off to OpenAI, and wait for the results
+            batch_file = await self.provider.send_batch(batch)
+            logger.debug(f"Batch file {batch_file.id} sent to OpenAI")
+
+            batch_task = await self.provider.create_batch_task(batch_file)
+
+            # Get results
+            results = await self.provider.get_batch_results(batch_task)
+            
+            # Write out results to dict for agents to pick up
+            for result in results:
+                self.provider.batch_out[result["custom_id"]] = ChatCompletion.model_validate(result["response"]["body"])
 
 class AzureOpenAIProvider(_Provider):
     """
@@ -37,33 +101,21 @@ class AzureOpenAIProvider(_Provider):
 
     tool_call_wrapper = OpenAIToolCall
     llm: Union[openai.AsyncAzureOpenAI, openai.AsyncOpenAI]
-    batcher_timeout = 2.0
+    mode : str = "chat"
 
     def __init__(
         self,
         model_name: str,
         interactive: bool,
-        mode: Literal["chat", "batch"] = "chat",
-        batch_size: int = 10,
         **kwargs,
     ):
         self.model_name = model_name
         self.interactive = interactive
         self.authenticate()
         self.llm = openai.AsyncAzureOpenAI(**kwargs)
-        self.mode = mode
-        self.batch_size = batch_size
-
         # Monkey-patching depending on selected mode
-        match self.mode:
-            case "chat":
-                self.endpoint_fn = self.llm.chat.completions.create
-            case "batch":
-                self.batch_idx = 1
-                self.endpoint_fn = self.query_batch_mode
-                self.batch_q: asyncio.Queue[Dict] = asyncio.Queue()
-                self.batch_out: Dict[str, ChatCompletion] = {}
-                asyncio.create_task(self._batcher(), name="OpenAIBatchAPIHandler")
+        if self.mode == "chat":
+            self.endpoint_fn = self.llm.chat.completions.create
 
     def authenticate(self) -> None:
         """
@@ -90,6 +142,110 @@ class AzureOpenAIProvider(_Provider):
 
         if getattr(self, "llm", None) is not None:
             self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
+
+    @backoff.on_exception(
+        backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3
+    )
+    async def prompt_agent(
+        self,
+        ag: _Agent,
+        prompt: Union[List[ChatCompletionMessageParam], ChatCompletionMessageParam],
+        **kwargs,
+    ):
+        """
+        An async version of the main OAI prompting logic.
+
+        :param ag: The calling agent class
+        :param prompt: Either a dict or a list of dicts representing the message(s) to send to OAI model
+        :param kwargs: Key word arguments passed to completions.create() call (tool calls, etc.)
+
+        :return: An openAI Choice response object
+        """
+
+        # Prompts should be passed as a list, so handle
+        # the case where we just passed a single dict
+        if not isinstance(prompt, list):
+            prompt = [prompt]
+
+        ag.scratchpad += "--- Input ---------------------------\n"
+        for msg in prompt:
+            if "content" in msg and isinstance(msg["content"], str):
+                ag.scratchpad += "\n" + msg["content"]
+        ag.scratchpad += "\n-----------------------------------\n"
+
+        try:
+            res = await self.endpoint_fn(
+                messages=prompt, model=self.model_name, **kwargs
+            )
+        except openai.AuthenticationError as e:
+            logger.info("Auth failed, attempting to re-authenticate before retrying")
+            self.authenticate()
+            raise e
+        except Exception as e:
+            # TODO: some error handling here
+            logger.debug(e)
+            raise e
+
+        out = res.choices[0]
+
+        ag.scratchpad += "--- Output --------------------------\n"
+        ag.scratchpad += "Message:\n"
+        ag.scratchpad += out.message.content if out.message.content else "<None>" + "\n"
+
+        if len(ag.TOOLS):
+            # attempt to parse tool call arguments
+            # BUG: OpenAI sometimes doesn't return a "tool_calls" reason and uses "stop" instead. Annoying.
+            if out.finish_reason == "tool_calls" or (
+                out.finish_reason == "stop"
+                and out.message.tool_calls
+                and len(out.message.tool_calls)
+            ):
+                out.finish_reason = "tool_calls"
+                # Append GPT response to next payload
+                # NOTE: This has to come before the next step of parsing
+                ag.tool_res_payload.append(out.message)
+
+        ag.scratchpad += "\n-----------------------------------\n"
+        logger.info(f"Received response: {out.message.content}")
+
+        if out.finish_reason == "length":
+            ag.truncated = True
+            ag.scratchpad += (
+                "Response returned truncated from OpenAI due to token length.\n"
+            )
+            logger.warning("Message returned truncated.")
+        return out
+
+class AzureOpenAIBatchProvider(AzureOpenAIProvider):
+    """
+    Azure OpenAI using the Batch API
+    """
+    
+    mode = "batch"
+
+    def __init__(self, model_name: str, *, interactive: bool = False, batch_size: int = DEFAULT_BATCH_SIZE, batch_handler: Optional[OpenAIBatchAPIHelper] = None, **kwargs):
+        """
+        Using AzureOpenAI with the Batch API mode. Each batch typically takes several minutes or longer to be evaluated, but many requests
+        can be sent at once, and the price/request is generally around half of the standard chat endpoint.
+
+        :param str model_name: The name of an Azure OpenAI deployment
+        :param bool interactive: Should the requests be run in interactive mode using EntraID credentials
+        :param int batch_size: The maximum size of batches that should be sent to OpenAI at a time
+        :param OpenAIBatchAPIHelper batch_handler: (optional) An initialized batch handler which will be used to handle the inqueue of requests to send to openAI
+        :param kwargs: Any keyword arguments to pass to OpenAI class
+        
+        """
+        self.batch_size = batch_size
+        self.batch_idx = 1
+        self.endpoint_fn = self.query_batch_mode
+        self.batch_q: asyncio.Queue[Dict] = asyncio.Queue()
+        self.batch_out: Dict[str, ChatCompletion] = {}
+
+        if batch_handler is None:
+            self.batch_handler = OpenAIBatchAPIHelper(batch_size=batch_size)
+        self.batch_handler.register_provider(self)
+
+        super().__init__(model_name, interactive, **kwargs)
 
     async def query_batch_mode(
         self, messages: List[ChatCompletionMessageParam], model: str, **kwargs
@@ -122,58 +278,6 @@ class AzureOpenAIProvider(_Provider):
                 continue
 
         return out
-
-    async def _batcher(self):
-        """
-        Batch loop
-
-        This is a co-routine that puts all of our messages together into a batch, sends them off,
-        and stores the results back into a dict for the individual agents to handle.
-
-        It's started at init time if we select batch mode, and persists for the duration of the session.
-
-        TODO: Maybe better to break out somehow into a separate handler class to allow for multiple workers
-        to spin up and send off a lot of batches at once. I'm not sure how it works yet.
-        """
-        while True:
-            # Define our batch and start the clock
-            batch = []
-            batch_poll_start = asyncio.get_running_loop().time()
-
-            # Await new messages to load into the batch
-            # - Until we hit our max batch size, or
-            # - Until we've waited for the time indicated (default 2s)
-            while len(batch) <= self.batch_size:
-                time_remaining = self.batcher_timeout - (
-                    asyncio.get_running_loop().time() - batch_poll_start
-                )
-                if time_remaining <= 0.0:
-                    # We've waited long enough, send what we have in a batch
-                    break
-                try:
-                    req = await asyncio.wait_for(self.batch_q.get(), timeout=0.1)
-                    batch.append(req)
-                    self.batch_q.task_done()
-                except asyncio.TimeoutError:
-                    continue
-
-            # Case: Nothing to submit
-            # - Just re-run until we do
-            if len(batch) == 0:
-                continue
-
-            # Otherwise: create our batch payload, send off to OpenAI, and wait for the results
-            batch_file = await self.send_batch(batch)
-            logger.debug(f"Batch file {batch_file.id} sent to OpenAI")
-
-            batch_task = await self.create_batch_task(batch_file)
-
-            # Get results
-            results = await self.get_batch_results(batch_task)
-            
-            # Write out results to dict for agents to pick up
-            for result in results:
-                self.batch_out[result["custom_id"]] = ChatCompletion.model_validate(result["response"]["body"])
 
     @staticmethod
     def _create_batch_file(tasks: List[dict]) -> Tuple[str, bytes, str]:
@@ -264,80 +368,6 @@ class AzureOpenAIProvider(_Provider):
                 results.append(json.loads(line))
 
         return results
-
-    @backoff.on_exception(
-        backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3
-    )
-    async def prompt_agent(
-        self,
-        ag: _Agent,
-        prompt: Union[List[ChatCompletionMessageParam], ChatCompletionMessageParam],
-        **kwargs,
-    ):
-        """
-        An async version of the main OAI prompting logic.
-
-        :param ag: The calling agent class
-        :param prompt: Either a dict or a list of dicts representing the message(s) to send to OAI model
-        :param kwargs: Key word arguments passed to completions.create() call (tool calls, etc.)
-
-        :return: An openAI Choice response object
-        """
-
-        # Prompts should be passed as a list, so handle
-        # the case where we just passed a single dict
-        if not isinstance(prompt, list):
-            prompt = [prompt]
-
-        ag.scratchpad += "--- Input ---------------------------\n"
-        for msg in prompt:
-            if "content" in msg and isinstance(msg["content"], str):
-                ag.scratchpad += "\n" + msg["content"]
-        ag.scratchpad += "\n-----------------------------------\n"
-
-        try:
-            res = await self.endpoint_fn(
-                messages=prompt, model=self.model_name, **kwargs
-            )
-        except openai.AuthenticationError as e:
-            logger.info("Auth failed, attempting to re-authenticate before retrying")
-            self.authenticate()
-            raise e
-        except Exception as e:
-            # TODO: some error handling here
-            logger.debug(e)
-            raise e
-
-        out = res.choices[0]
-
-        ag.scratchpad += "--- Output --------------------------\n"
-        ag.scratchpad += "Message:\n"
-        ag.scratchpad += out.message.content if out.message.content else "<None>" + "\n"
-
-        if len(ag.TOOLS):
-            # attempt to parse tool call arguments
-            # BUG: OpenAI sometimes doesn't return a "tool_calls" reason and uses "stop" instead. Annoying.
-            if out.finish_reason == "tool_calls" or (
-                out.finish_reason == "stop"
-                and out.message.tool_calls
-                and len(out.message.tool_calls)
-            ):
-                out.finish_reason = "tool_calls"
-                # Append GPT response to next payload
-                # NOTE: This has to come before the next step of parsing
-                ag.tool_res_payload.append(out.message)
-
-        ag.scratchpad += "\n-----------------------------------\n"
-        logger.info(f"Received response: {out.message.content}")
-
-        if out.finish_reason == "length":
-            ag.truncated = True
-            ag.scratchpad += (
-                "Response returned truncated from OpenAI due to token length.\n"
-            )
-            logger.warning("Message returned truncated.")
-        return out
-
 
 class OpenAIProvider(AzureOpenAIProvider):
     """

@@ -6,7 +6,7 @@ from .agent import (
 )
 from .callbacks import AgentCallback
 from .processors import BatchProcessor, DFBatchProcessor
-from .providers import OpenAIProvider, AzureOpenAIProvider
+from .providers import OpenAIProvider, AzureOpenAIProvider, AzureOpenAIBatchProvider
 from .stopping_conditions import (
     StoppingCondition,
     StopOnStep,

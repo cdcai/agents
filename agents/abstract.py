@@ -293,3 +293,14 @@ class _Agent(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def reset(self):
         raise NotImplementedError()
+
+class _BatchAPIHelper(metaclass=abc.ABCMeta):
+    timeout : float = 2.
+    task : Union[Task, List[Task]]
+
+    @abc.abstractmethod
+    def register_provider(self, provider: _Provider):
+        """
+        Main method to link provider and start batching task via asyncio
+        """
+        pass

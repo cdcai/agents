@@ -1,3 +1,3 @@
-from .openai import OpenAIProvider, AzureOpenAIProvider
+from .openai import OpenAIProvider, AzureOpenAIProvider, AzureOpenAIBatchProvider
 
-__all__ = ["OpenAIProvider", "AzureOpenAIProvider"]
+__all__ = ["OpenAIProvider", "AzureOpenAIProvider", "AzureOpenAIBatchProvider"]
