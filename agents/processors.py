@@ -2,19 +2,20 @@ import asyncio
 import logging
 from abc import ABCMeta, abstractmethod
 from itertools import islice
-from typing import Any, Iterable, Iterator, Optional, Sequence, Tuple
+from typing import Any, Iterable, Iterator, Optional, Sequence, Tuple, Type
 
 import polars as pl
-from tqdm import tqdm
+import tqdm.asyncio as tqdm
 
 from .abstract import _Provider
 from .agent import Agent
 from .providers import AzureOpenAIProvider
+from .providers.openai import AzureOpenAIBatchProvider, OpenAIBatchAPIHelper
 
 logger = logging.getLogger(__name__)
 
 
-class _BatchProcessor(metaclass=ABCMeta):
+class _Processor(metaclass=ABCMeta):
     """
     A virtual class for a processor that maps over a large iterable
     where 1 output is expected for every 1 input
@@ -23,10 +24,9 @@ class _BatchProcessor(metaclass=ABCMeta):
     def __init__(
         self,
         data: Iterable,
-        agent_class: type[Agent],
+        agent_class: Type[Agent],
         provider: Optional[_Provider],
-        batch_size: int = 5,
-        n_workers: int = 1,
+        batch_size : int,
         n_retry: int = 5,
         **kwargs,
     ):
@@ -37,57 +37,25 @@ class _BatchProcessor(metaclass=ABCMeta):
         :param Iterable data: An object which will be split into chunks of `batch_size` and passed as-is to `agent_class`
         :param Agent agent_class: An uninitialized class which will be used to process the batches of `data` (which it takes as a named argument, `batch`, for formatting)
         :param _Provider provider: Optionally, an initialized LLM provider to use with the processor
-        :param int batch_size: Number of rows per batch of `data`
-        :param int n_workers: Number of workers to use during processing. >1 will spawn parallel workers using concurrent.futures
+        :param int batch_size: Number of elements per batch of `data`
         :param int n_retry: For each agent, how many round trips to try before giving up
         :param kwargs: Additional named arguments passed to `agent_class` on init
         """
         self.agent_class = agent_class
         self.data = data
-        self.n_workers = n_workers
         self.batch_size = batch_size
         self.n_retry = n_retry
         self.agent_kwargs = kwargs
-
-        if provider is not None:
-            self.provider = provider
-        else:
-            # Default to AzureOpenAI
-            try:
-                self.provider = AzureOpenAIProvider(
-                    model_name=kwargs["model_name"], interactive=True
-                )
-            except KeyError:
-                raise RuntimeError(
-                    "If `provider` is not passed, `model_name` must be passed to initialize one!"
-                )
+        self.provider = provider
+        self.agents = []
 
         # Parallel queues
         #                                idx, retries remaining, batch
-        self.in_q: asyncio.PriorityQueue[Tuple[int, int, Any]] = asyncio.PriorityQueue()
+        self.in_q: asyncio.PriorityQueue[Tuple[int, int, Agent]] = (
+            asyncio.PriorityQueue()
+        )
         #                                        idx, response
-        self.out_q: asyncio.PriorityQueue[Tuple[int, Any]] = asyncio.PriorityQueue()
-
-    def _load_inqueue(self):
-        """
-        Load inqueue for parallel processing
-        """
-        logger.info("Loading Inqueue")
-        for i, batch in enumerate(self._iter()):
-            self.in_q.put_nowait((i, self.n_retry, batch))
-
-        self.error_tasks = 0
-
-    @staticmethod
-    def dequeue(q: asyncio.Queue) -> list:
-        out = []
-        while q.qsize() > 0:
-            try:
-                it = q.get_nowait()
-                out.append(it)
-            except asyncio.QueueEmpty:
-                break
-        return out
+        self.out_q: asyncio.PriorityQueue[Tuple[int, Agent]] = asyncio.PriorityQueue()
 
     @abstractmethod
     def _iter(self) -> Iterator:
@@ -104,12 +72,104 @@ class _BatchProcessor(metaclass=ABCMeta):
         """
         raise NotImplementedError()
 
+    @abstractmethod
     async def process(self):
         """
         Process all samples from input data using language agent, splitting by chunk size specified at init
 
         :return Iterable: The predicted values after mapping over the input iterable (also stored in self.predicted)
         """
+        pass
+
+    @staticmethod
+    def _batch_format(batch: Any) -> str:
+        """
+        An optional formatter to convert batch into a str
+        """
+        return str(batch)
+
+    def _spawn_agent(self, batch: Iterable, **kwargs) -> Agent:
+        """
+        Spawn agent for next run, formatting batch as appropriate
+
+        :param batch: An iterable, the next piece of data to be processed from in_q
+        :param kwargs: Any additional named arguments passed to initializer of agent class
+
+        :return: An initialized Agent class
+        """
+        batch_str = self._batch_format(batch)
+        out = self.agent_class(
+            provider=self.provider, **self.agent_kwargs, batch=batch_str, **kwargs
+        )  # type: ignore[misc]
+        return out
+
+    def _load_inqueue(self):
+        """
+        Load inqueue for parallel processing
+        """
+        logger.info("Loading Inqueue")
+        for i, batch in enumerate(self._iter()):
+            self.in_q.put_nowait((i, self.n_retry, self._spawn_agent(batch)))
+
+        self.error_tasks = 0
+
+    @staticmethod
+    def dequeue(q: asyncio.Queue) -> list:
+        out = []
+        while q.qsize() > 0:
+            try:
+                it = q.get_nowait()
+                out.append(it)
+            except asyncio.QueueEmpty:
+                break
+        return out
+
+
+class SeqProcessor(_Processor):
+    """
+    A Batch Processor that handles resolving all agents sequentially (with some concurrency if n_workers > 1)
+    """
+
+    def __init__(
+        self,
+        data: Iterable,
+        agent_class: Type[Agent],
+        provider: _Provider | None,
+        batch_size: int = 5,
+        n_workers: int = 1,
+        n_retry: int = 5,
+        **kwargs,
+    ):
+        """
+        A Processor which operates on chunks of an Iterable.
+        Each chunk must be independent, as state will not be maintained between agent calls.
+
+        :param Iterable data: An object which will be split into chunks of `batch_size` and passed as-is to `agent_class`
+        :param Agent agent_class: An uninitialized class which will be used to process the batches of `data` (which it takes as a named argument, `batch`, for formatting)
+        :param _Provider provider: Optionally, an initialized LLM provider to use with the processor
+        :param int batch_size: Number of elements per batch of `data`
+        :param int n_workers: Number of workers to use during processing. >1 will spawn parallel workers using concurrent.futures
+        :param int n_retry: For each agent, how many round trips to try before giving up
+        :param kwargs: Additional named arguments passed to `agent_class` on init
+        """
+        self.n_workers = n_workers
+        self.batch_size = batch_size
+
+        if provider is None:
+            try:
+                provider = AzureOpenAIProvider(
+                    model_name=kwargs["model_name"], interactive=True
+                )
+            except KeyError:
+                raise RuntimeError(
+                    "If `provider` is not passed, `model_name` must be passed to initialize one!"
+                )
+
+        super().__init__(
+            data, agent_class, provider, n_retry, **kwargs
+        )
+
+    async def process(self):
         # Either the workers we called for at init or the number of batches we have to process
         # (whichever is fewer)
         self._load_inqueue()
@@ -118,7 +178,7 @@ class _BatchProcessor(metaclass=ABCMeta):
             f"[_process_parallel] processing {self.in_q.qsize()} queries on {n_workers} threads"
         )
 
-        self.pbar = tqdm(total=self.in_q.qsize(), desc="Batch Processing", unit="Batch")
+        self.pbar = tqdm.tqdm(total=self.in_q.qsize(), desc="Batch Processing", unit="Batch")
         workers = []
 
         for i in range(n_workers):
@@ -147,11 +207,9 @@ class _BatchProcessor(metaclass=ABCMeta):
 
         # De-queue into list from output queue
         out = []
-        for _, msg in self.dequeue(self.out_q):
-            if isinstance(msg, list):
-                out.extend(msg)
-            else:
-                out.append(msg)
+        for _, ag in self.dequeue(self.out_q):
+            out.append(ag.answer)
+            self.agents.append(ag)
 
         return out
 
@@ -166,10 +224,9 @@ class _BatchProcessor(metaclass=ABCMeta):
         """
         while True:
             try:
-                (id, retry_left, data) = await in_q.get()
+                (id, retry_left, agent) = await in_q.get()
                 errored = False
-                agent = self._spawn_agent(data)
-                answer = await agent()
+                answer = await agent(reset=True)
 
                 if len(answer) == 0:
                     logger.error(
@@ -194,14 +251,14 @@ class _BatchProcessor(metaclass=ABCMeta):
                     logger.error(
                         f"[_worker - {worker_name}]: Task {id} failed {self.n_retry} times and will not be retried"
                     )
-                    answer = self._placeholder(data)
+                    answer = self._placeholder(agent.fmt_kwargs["batch"])
                     self.error_tasks += 1
                 else:
                     # Send data back to queue to retry processing
                     logger.info(
                         f"[_worker - {worker_name}]: Task {id} - {retry_left} retries remaining"
                     )
-                    await in_q.put((id, retry_left, data))
+                    await in_q.put((id, retry_left, agent))
                     in_q.task_done()
                     continue
 
@@ -209,30 +266,8 @@ class _BatchProcessor(metaclass=ABCMeta):
             self.pbar.update()
             in_q.task_done()
 
-    @staticmethod
-    def _batch_format(batch: Any) -> str:
-        """
-        An optional formatter to convert batch into a str
-        """
-        return str(batch)
 
-    def _spawn_agent(self, batch: Iterable, **kwargs) -> Agent:
-        """
-        Spawn agent for next run, formatting batch as appropriate
-
-        :param batch: An iterable, the next piece of data to be processed from in_q
-        :param kwargs: Any additional named arguments passed to initializer of agent class
-
-        :return: An initialized Agent class
-        """
-        batch_str = self._batch_format(batch)
-        out = self.agent_class(
-            provider=self.provider, **self.agent_kwargs, batch=batch_str, **kwargs
-        )  # type: ignore[misc]
-        return out
-
-
-class BatchProcessor(_BatchProcessor):
+class _ProcessorIterable(_Processor):
     """
     A batch processor which maps an Agent over elements of an iterable (usually a list[str]).
 
@@ -261,7 +296,16 @@ class BatchProcessor(_BatchProcessor):
         return [resp_obj] * len(batch)
 
 
-class DFBatchProcessor(_BatchProcessor):
+class ProcessorIterable(_ProcessorIterable, SeqProcessor):
+    """
+    A processor which operates on chunks of an iterable with `n_workers` agents at a time.
+    Each chunk must be independent, as state will not be maintained between agent calls.
+
+    The main user-facing method after init is :func:`process()`
+    """
+
+
+class _ProcessorDF(_Processor):
     """
     A Processor which operates on chunks of a polars dataframe.
     Each chunk must be independent, as state will not be maintained between agent calls.
@@ -291,3 +335,117 @@ class DFBatchProcessor(_BatchProcessor):
         Write out batch argument as ndJSON formatted str to insert into BASE_PROMPT
         """
         return batch.write_ndjson()
+
+
+class ProcessorDF(_ProcessorDF, SeqProcessor):
+    """
+    A processor which operates on chunks of a polars dataframe with `n_workers` agents at a time.
+    """
+
+
+class AllCallProcessor(_Processor):
+    """
+    A processor which operates on all elements of an iterable, firing all agent calls at once.
+    This is useful when using a Batch API
+    Each chunk must be independent, as state will not be maintained between agent calls.
+
+    The main user-facing method after init is :func:`process()`
+    """
+
+    async def process(self):
+        """
+        Process all samples from input data using language agents.
+        """
+        # Either the workers we called for at init or the number of batches we have to process
+        # (whichever is fewer)
+        self._load_inqueue()
+
+        logger.info(f"[_process_parallel] processing {self.in_q.qsize()} agents")
+
+        self.pbar = tqdm.tqdm(total=self.in_q.qsize(), desc="Batch Processing", unit="Batch")
+        workers = []
+
+        for idx, retries_left, agent in self.dequeue(self.in_q):
+            workers.append(
+                asyncio.create_task(
+                    self._agent_handler(agent, idx, retries_left),
+                    name=f"agent-{idx}",
+                )
+            )
+
+        # Wait for all agents to complete
+        try:
+            await self.pbar.gather(*workers)
+        finally:
+            self.pbar.close()
+
+        if self.error_tasks > 0:
+            logger.warning(
+                f"[process] There were {self.error_tasks} unsucessful batches!"
+            )
+
+        # De-queue into list from output queue
+        out = []
+        for _, ag in self.dequeue(self.out_q):
+            out.append(ag.answer)
+            self.agents.append(ag)
+
+        return out
+
+    async def _agent_handler(self, agent: Agent, id: int, retry_left: int) -> None:
+        """
+        Handle a single agent call, returning the agent into the out_q.
+
+        handles retries and errors, returning a placeholder if the agent fails
+        """
+        errored = False
+        try:
+            answer = await agent(reset=True)
+
+            if len(answer) == 0:
+                logger.error(f"[_agent_handler]: No answer was provided for query {id}")
+                errored = True
+
+        except Exception as e:
+            logger.error(f"[_agent_handler]: Task {id} failed, {str(e)}")
+            errored = True
+
+        if errored:
+            retry_left -= 1
+            if retry_left <= 0:
+                # End retries, fill in data with placeholder
+                logger.error(
+                    f"[_agent_handler]: Task {id} failed {self.n_retry} times and will not be retried"
+                )
+                agent.answer = self._placeholder(agent.fmt_kwargs["batch"])
+                self.error_tasks += 1
+            else:
+                # Send data back to queue to retry processing
+                logger.info(
+                    f"[_agent_handler]: Task {id} - {retry_left} retries remaining"
+                )
+                await self.in_q.put((id, retry_left, agent))
+                return None
+
+        await self.out_q.put((id, agent))
+        self.pbar.update()
+
+
+class BatchProcessorIterable(_ProcessorIterable, AllCallProcessor):
+    """
+    A processor which operates on chunks of an iterable calling all agents at once.
+    This assumes you're using a Batch API Provider (e.g. Azure OpenAI Batch API).
+    Each chunk must be independent, as state will not be maintained between agent calls.
+
+    The main user-facing method after init is :func:`process()`
+    """
+
+
+class BatchProcessorDF(_ProcessorDF, AllCallProcessor):
+    """
+    A processor which operates on chunks of an polars DataFrame calling all agents at once.
+    This assumes you're using a Batch API Provider (e.g. Azure OpenAI Batch API).
+    Each chunk must be independent, as state will not be maintained between agent calls.
+
+    The main user-facing method after init is :func:`process()`
+    """

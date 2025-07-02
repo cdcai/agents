@@ -1,17 +1,19 @@
 import asyncio
+import json
 import logging
 import os
-import json
-from typing import List, Union, Tuple, Dict, Optional
-from io import StringIO, BytesIO
+from io import BytesIO, StringIO
+from typing import Dict, List, Optional, Tuple, Union
 
 import backoff
 import openai
+import tqdm.asyncio as tqdm
 from azure.identity import ClientSecretCredential, InteractiveBrowserCredential
-from openai.types.chat import ChatCompletionMessageParam, ChatCompletion
-from openai.types.file_object import FileObject
 from openai.types.batch import Batch
-from ..abstract import _Agent, _Provider, _BatchAPIHelper
+from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
+from openai.types.file_object import FileObject
+
+from ..abstract import _Agent, _BatchAPIHelper, _Provider
 from ..tools import OpenAIToolCall
 
 DEFAULT_BATCH_SIZE = 1000
@@ -22,14 +24,24 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper):
 
     provider : "AzureOpenAIBatchProvider"
 
-    def __init__(self, batch_size: int):
+    def __init__(self, batch_size: int, n_workers : int = 1):
         self.batch_size = batch_size
+        self.n_workers = n_workers
+        self.batch_tasks = []
 
     def register_provider(self, provider: "AzureOpenAIBatchProvider"):
         """
         Store provider as an attribute and start up batching task
         """
         self.provider = provider
+        self.pbar = tqdm.tqdm(
+            desc="Active Batch Requests",
+            bar_format="{desc}| {bar}| {n_fmt}/{total_fmt}",
+            total=self.n_workers
+        )
+        self.pbar_lock = asyncio.Lock()
+        # Create a Semaphore to ensure only n_workers batches running concurrently
+        self.lock = asyncio.Semaphore(self.n_workers)
         self.task = asyncio.create_task(self._batcher(), name="OpenAIBatchHelper")
 
     async def _batcher(self):
@@ -41,6 +53,8 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper):
 
         It's started at init time if we select batch mode, and persists for the duration of the session.
         """
+        # TODO: this needs to be a handler that is submitted for each batch rathern than a running task
+        # if n workers were spun up, you only end up with ~n / 2 per worker which isn't efficient
         while True:
             # Define our batch and start the clock
             batch = []
@@ -67,20 +81,36 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper):
             # - Just re-run until we do
             if len(batch) == 0:
                 continue
+            
+            # Submit a new batch if we don't already have too many running
+            async with self.lock:
+                self.batch_tasks.append(asyncio.create_task(self._batch_handler(batch)))
 
-            # Otherwise: create our batch payload, send off to OpenAI, and wait for the results
-            batch_file = await self.provider.send_batch(batch)
-            logger.debug(f"Batch file {batch_file.id} sent to OpenAI")
 
+    async def _batch_handler(self, batch: List[ChatCompletionMessageParam]) -> None:
+        """
+        A handler method that submits the batch of tasks to OpenAI and retrieves the results
+        when finished.
+
+        """
+        # Otherwise: create our batch payload, send off to OpenAI, and wait for the results
+        # Create batch file, send to OpenAI and execute
+        batch_file = await self.provider.send_batch(batch)
+        try:
+            async with self.pbar_lock:
+                self.pbar.update(1)
             batch_task = await self.provider.create_batch_task(batch_file)
-
             # Get results
             results = await self.provider.get_batch_results(batch_task)
             
             # Write out results to dict for agents to pick up
-            for result in results:
-                self.provider.batch_out[result["custom_id"]] = ChatCompletion.model_validate(result["response"]["body"])
-
+            async with self.provider.batch_out_lock:
+                for result in results:
+                    self.provider.batch_out[result["custom_id"]] = ChatCompletion.model_validate(result["response"]["body"])
+        finally:
+            async with self.pbar_lock:
+                self.pbar.update(-1)
+                self.pbar.refresh()
 class AzureOpenAIProvider(_Provider):
     """
     An Azure OpenAI Provider for language Agents.
@@ -219,30 +249,49 @@ class AzureOpenAIProvider(_Provider):
 class AzureOpenAIBatchProvider(AzureOpenAIProvider):
     """
     Azure OpenAI using the Batch API
+
+    This provider is designed to handle large batches of requests to OpenAI's Batch API, which are completed asynchronously.
+    Each batch typically takes several minutes or longer to be evaluated, but many requests can be sent at once,
+    and the price/request is generally around half of the standard chat endpoint.
+
+    Additionally, one can send multiple batches at once, further speeding up processing time on large tasks.
     """
     
     mode = "batch"
 
-    def __init__(self, model_name: str, *, interactive: bool = False, batch_size: int = DEFAULT_BATCH_SIZE, batch_handler: Optional[OpenAIBatchAPIHelper] = None, **kwargs):
+    def __init__(
+            self,
+            model_name: str,
+            *,
+            interactive: bool = False,
+            batch_size: int = DEFAULT_BATCH_SIZE,
+            n_workers : int = 1,
+            batch_handler: Optional[OpenAIBatchAPIHelper] = None,
+            **kwargs
+        ):
         """
         Using AzureOpenAI with the Batch API mode. Each batch typically takes several minutes or longer to be evaluated, but many requests
         can be sent at once, and the price/request is generally around half of the standard chat endpoint.
 
-        :param str model_name: The name of an Azure OpenAI deployment
+        :param str model_name: The name of an Azure OpenAI deployment (note: must be a batch-capable model, such as gpt-4o-batch)
         :param bool interactive: Should the requests be run in interactive mode using EntraID credentials
         :param int batch_size: The maximum size of batches that should be sent to OpenAI at a time
+        :param int n_workers: If `batch_handler` is not provided, the number of workers to run in parallel to process incoming requests (default: 1)
         :param OpenAIBatchAPIHelper batch_handler: (optional) An initialized batch handler which will be used to handle the inqueue of requests to send to openAI
         :param kwargs: Any keyword arguments to pass to OpenAI class
         
         """
         self.batch_size = batch_size
         self.batch_idx = 1
+        self.batch_idx_lock = asyncio.Lock()
         self.endpoint_fn = self.query_batch_mode
         self.batch_q: asyncio.Queue[Dict] = asyncio.Queue()
         self.batch_out: Dict[str, ChatCompletion] = {}
-
+        self.batch_out_lock = asyncio.Lock()
         if batch_handler is None:
-            self.batch_handler = OpenAIBatchAPIHelper(batch_size=batch_size)
+            self.batch_handler = OpenAIBatchAPIHelper(batch_size=batch_size, n_workers=n_workers)
+        
+        # Register the batch handler and start the batch processing task
         self.batch_handler.register_provider(self)
 
         super().__init__(model_name, interactive, **kwargs)
@@ -250,8 +299,10 @@ class AzureOpenAIBatchProvider(AzureOpenAIProvider):
     async def query_batch_mode(
         self, messages: List[ChatCompletionMessageParam], model: str, **kwargs
     ) -> ChatCompletion:
-        task_id = f"task-{self.batch_idx}"
-        self.batch_idx += 1
+
+        async with self.batch_idx_lock:
+            task_id = f"task-{self.batch_idx}"
+            self.batch_idx += 1
 
         task = {
             "custom_id": task_id,
@@ -265,14 +316,13 @@ class AzureOpenAIBatchProvider(AzureOpenAIProvider):
         task_done = False
         while not task_done:
             try:
-                out = self.batch_out.pop(task_id)
+                async with self.batch_out_lock:
+                    out = self.batch_out.pop(task_id)
                 task_done = True
                 if isinstance(out, Exception):
                     # Propagate errors if we encountered any
                     raise out
             except KeyError:
-                # DEBUG: Remove this when batch size is >>
-                logger.debug(f"Still waiting for batch response [{task_id}]")
                 # Poll every 5s for the response
                 await asyncio.sleep(5)
                 continue
@@ -280,7 +330,7 @@ class AzureOpenAIBatchProvider(AzureOpenAIProvider):
         return out
 
     @staticmethod
-    def _create_batch_file(tasks: List[dict]) -> Tuple[str, bytes, str]:
+    def _create_batch_file(tasks: List[ChatCompletionMessageParam]) -> Tuple[str, bytes, str]:
         """
         Create a batch file for the OpenAI Batch API
 
@@ -300,7 +350,7 @@ class AzureOpenAIBatchProvider(AzureOpenAIProvider):
 
     async def send_batch(
         self,
-        tasks: List[dict],
+        tasks: List[ChatCompletionMessageParam],
         **kwargs,
     ) -> FileObject:
         """
@@ -329,25 +379,25 @@ class AzureOpenAIBatchProvider(AzureOpenAIProvider):
         :return: An OpenAI File object representing the created batch
         """
         try:
-            logger.info(f"Executing batch task [{batch_file.id}]")
             batch = await self.llm.batches.create(
                 input_file_id=batch_file.id,
                 endpoint="/v1/chat/completions",
                 completion_window="24h",
                 **kwargs,
             )
+            logger.info(f"Executing batch task [{batch_file.id}] -> [{batch.id}]")
         except:
             logger.error(f"Attempt to process batch {batch_file.id} failed!")
             raise
 
         while batch.status not in ["completed", "failed"]:
-            logger.info(f"Batch status [{batch.id}]: {batch.status}. Waiting for completion...")
+            logger.info(f"Batch [{batch.id}] Status: {batch.status}")
             batch = await self.llm.batches.retrieve(batch.id)
             await asyncio.sleep(timeout)
 
         return batch
 
-    async def get_batch_results(self, batch: Batch) -> List[dict]:
+    async def get_batch_results(self, batch: Batch) -> List[Dict]:
         """
         Retrieve the results of a completed batch.
 

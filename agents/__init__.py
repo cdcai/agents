@@ -5,7 +5,7 @@ from .agent import (
     PredictionAgentWithJustification,
 )
 from .callbacks import AgentCallback
-from .processors import BatchProcessor, DFBatchProcessor
+from .processors import BatchProcessorDF, BatchProcessorIterable, ProcessorDF, ProcessorIterable
 from .providers import OpenAIProvider, AzureOpenAIProvider, AzureOpenAIBatchProvider
 from .stopping_conditions import (
     StoppingCondition,
@@ -21,10 +21,13 @@ __all__ = [
     "PredictionAgent",
     "PredictionAgentWithJustification",
     "AgentCallback",
-    "BatchProcessor",
-    "DFBatchProcessor",
+    "ProcessorIterable",
+    "BatchProcessorIterable",
+    "ProcessorDF",
+    "BatchProcessorDF",
     "OpenAIProvider",
     "AzureOpenAIProvider",
+    "AzureOpenAIBatchProvider",
     "StoppingCondition",
     "StopOnStep",
     "StopOnDataModel",
