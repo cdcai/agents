@@ -1,14 +1,17 @@
+"""
+Test OpenAI batch API functionality
+"""
 import asyncio
-from typing import Optional, Union
-from copy import copy
-import time
 import json
+import time
+from copy import copy
+
 import openai
 import pytest
 from openai._legacy_response import HttpxBinaryResponseContent
-from openai.types import Batch, FileObject
-from openai.resources.files import AsyncFiles
 from openai.resources.batches import AsyncBatches
+from openai.resources.files import AsyncFiles
+from openai.types import Batch, FileObject
 from pytest_mock import MockFixture
 
 import agents
@@ -37,40 +40,54 @@ mock_batch = Batch(
     status="validating",
 )
 
+
 # Simulate a fake batch response body
 def gen_response_body(n: int) -> bytes:
     """
     Generates a mock response body for batch completions.
     """
-    response_body = [{
-        "id": f"batch_{i + 1}",
-        "custom_id": f"task-{i + 1}",
-        "response": {
-            "status_code": 200,
-            "request_id": "req_1234",
-            "body": {
-                "id": "chatcmpl-11111",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "gpt-4o",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": "Lorem ipsum, dolor sit amet."},
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {"prompt_tokens": 24, "completion_tokens": 15, "total_tokens": 39},
-                "system_fingerprint": None,
+    response_body = [
+        {
+            "id": f"batch_{i + 1}",
+            "custom_id": f"task-{i + 1}",
+            "response": {
+                "status_code": 200,
+                "request_id": "req_1234",
+                "body": {
+                    "id": "chatcmpl-11111",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "gpt-4o",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "Lorem ipsum, dolor sit amet.",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 24,
+                        "completion_tokens": 15,
+                        "total_tokens": 39,
+                    },
+                    "system_fingerprint": None,
+                },
             },
-        },
-        "error": None,
-    } for i in range(n)]
+            "error": None,
+        }
+        for i in range(n)
+    ]
 
     # Encode as bytes
-    response_body_bytes = "\n".join(json.dumps(res) for res in response_body).encode("utf-8")
+    response_body_bytes = "\n".join(json.dumps(res) for res in response_body).encode(
+        "utf-8"
+    )
 
     return response_body_bytes
+
 
 def retrieve_mock_gen(timeout: int = 10):
     """
@@ -90,16 +107,16 @@ def retrieve_mock_gen(timeout: int = 10):
 
     return inner
 
+
 class DummyAgent(agents.Agent):
     SYSTEM_PROMPT = "You're an agent."
     BASE_PROMPT = "Do something.\n{batch}"
 
     def __init__(self, provider=None, **kwargs):
         super().__init__(
-            stopping_condition=agents.StopOnStep(1),
-            provider=provider,
-            **kwargs
+            stopping_condition=agents.StopOnStep(1), provider=provider, **kwargs
         )
+
 
 def mock_oai(mocker: MockFixture, n_queries: int = 1, batch_timeout: int = 10):
     mock_response = mocker.Mock(spec=HttpxBinaryResponseContent)
@@ -115,6 +132,7 @@ def mock_oai(mocker: MockFixture, n_queries: int = 1, batch_timeout: int = 10):
     mocker.patch.object(AsyncFiles, "content", return_value=mock_response)
     mocker.patch.object(AsyncBatches, "create", return_value=mock_batch)
     mocker.patch.object(AsyncBatches, "retrieve", retrieve_mock_gen(batch_timeout))
+
 
 @pytest.mark.asyncio
 async def test_batch_mocking(mocker: MockFixture):
@@ -150,7 +168,7 @@ async def test_batch_mocking(mocker: MockFixture):
     outer_batch.status = "completed"
     await asyncio.sleep(10)
     assert await aoi.batches.retrieve("batch_123") == outer_batch
-    
+
     # Test that batch content comes through ok
     file_content = await aoi.files.content("file_123")
     assert file_content.content == gen_response_body(1)
@@ -166,10 +184,7 @@ async def test_batch_api(mocker: MockFixture):
     aoi.files = AsyncFiles(aoi)
     aoi.batches = AsyncBatches(aoi)
 
-    provider = agents.AzureOpenAIBatchProvider(
-        "random_model",
-        quiet=True
-    )
+    provider = agents.AzureOpenAIBatchProvider("random_model", quiet=True)
 
     # Patch in mocked OAI API class
     provider.llm = aoi
@@ -180,8 +195,5 @@ async def test_batch_api(mocker: MockFixture):
     async with provider:
         ag = DummyAgent(provider=provider, batch="blah")
         await ag()
- 
-    assert ag.answer == 'Lorem ipsum, dolor sit amet.'
 
-
-
+    assert ag.answer == "Lorem ipsum, dolor sit amet."
