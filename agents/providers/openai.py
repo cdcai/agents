@@ -319,6 +319,8 @@ class AzureOpenAIBatchProvider(AzureOpenAIProvider):
         if hasattr(self, "batch_handler") and self.batch_handler is not None:
             # Cancel the batch processing task
             await self.batch_handler.close()
+            # Close the progress bar
+            self.batch_handler.pbar.close()
 
     async def query_batch_mode(
         self, messages: List[ChatCompletionMessageParam], model: str, **kwargs
