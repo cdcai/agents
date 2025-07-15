@@ -68,7 +68,9 @@ class Agent(_Agent):
         # We default to Azure OpenAI here, but
         # we could also use something else as long as it follows the OpenAI API
         if provider is None:
-            self.provider = AzureOpenAIProvider(model_name=model_name)
+            self.provider = AzureOpenAIProvider(
+                model_name=model_name, interactive=False
+            )
         else:
             self.provider = provider
 
@@ -187,7 +189,7 @@ class Agent(_Agent):
         """
         if len(self.BASE_PROMPT) == 0:
             raise ValueError(
-                "You initialized an Agent with not BASE_PROMPT, please define this attribute with your prompt, optionally adding any formatting args in brackets."
+                "You initialized an Agent with no BASE_PROMPT, please define this attribute with your prompt, optionally adding any formatting args in brackets."
             )
         try:
             out = self.BASE_PROMPT.format(**self.fmt_kwargs)
