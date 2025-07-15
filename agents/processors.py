@@ -2,29 +2,32 @@ import asyncio
 import logging
 from abc import ABCMeta, abstractmethod
 from itertools import islice
-from typing import Any, Iterable, Iterator, Optional, Sequence, Tuple, Type, List
+from typing import Generic, Iterator, List, Sequence, Tuple, Type, TypeVar, Union
 
 import polars as pl
 import tqdm.asyncio as tqdm
 
-from .abstract import _Provider
+from .abstract import A, P, _Provider
 from .agent import Agent
-from .providers import AzureOpenAIProvider
 
 logger = logging.getLogger(__name__)
 
+DataInput = TypeVar("DataInput", Sequence, pl.DataFrame)
 
-class _Processor(metaclass=ABCMeta):
+
+class _Processor(Generic[A, P, DataInput], metaclass=ABCMeta):
     """
     A virtual class for a processor that maps over a large iterable
     where 1 output is expected for every 1 input
     """
 
+    data: DataInput
+
     def __init__(
         self,
-        data: Iterable,
-        agent_class: Type[Agent],
-        provider: Optional[_Provider],
+        data: DataInput,
+        agent_class: Type[A],
+        provider: P,
         batch_size: int,
         n_retry: int = 5,
         **kwargs,
@@ -50,11 +53,9 @@ class _Processor(metaclass=ABCMeta):
 
         # Parallel queues
         #                                idx, retries remaining, batch
-        self.in_q: asyncio.PriorityQueue[Tuple[int, int, Agent]] = (
-            asyncio.PriorityQueue()
-        )
+        self.in_q: asyncio.PriorityQueue[Tuple[int, int, A]] = asyncio.PriorityQueue()
         #                                        idx, response
-        self.out_q: asyncio.PriorityQueue[Tuple[int, Agent]] = asyncio.PriorityQueue()
+        self.out_q: asyncio.PriorityQueue[Tuple[int, A]] = asyncio.PriorityQueue()
 
     @abstractmethod
     def _iter(self) -> Iterator:
@@ -64,7 +65,7 @@ class _Processor(metaclass=ABCMeta):
         raise NotImplementedError()
 
     @abstractmethod
-    def _placeholder(self, batch: Any) -> Any:
+    def _placeholder(self, batch: DataInput) -> List[Union[str, Tuple[str, ...]]]:
         """
         Abstract method which should return an appropriately sized placholder data piece
         that will be inserted in place of a real prediction if we encounter an error
@@ -81,13 +82,13 @@ class _Processor(metaclass=ABCMeta):
         pass
 
     @staticmethod
-    def _batch_format(batch: Any) -> str:
+    def _batch_format(batch: DataInput) -> str:
         """
         An optional formatter to convert batch into a str
         """
         return str(batch)
 
-    def _spawn_agent(self, batch: Iterable, **kwargs) -> Agent:
+    def _spawn_agent(self, batch: DataInput, **kwargs) -> A:
         """
         Spawn agent for next run, formatting batch as appropriate
 
@@ -99,7 +100,7 @@ class _Processor(metaclass=ABCMeta):
         batch_str = self._batch_format(batch)
         out = self.agent_class(
             provider=self.provider, **self.agent_kwargs, batch=batch_str, **kwargs
-        )  # type: ignore[misc]
+        )
         return out
 
     def _load_inqueue(self):
@@ -131,9 +132,9 @@ class SeqProcessor(_Processor):
 
     def __init__(
         self,
-        data: Iterable,
-        agent_class: Type[Agent],
-        provider: Optional[_Provider] = None,
+        data: Sequence,
+        agent_class: Type[A],
+        provider: _Provider,
         batch_size: int = 5,
         n_workers: int = 1,
         n_retry: int = 5,
@@ -153,16 +154,6 @@ class SeqProcessor(_Processor):
         """
         self.n_workers = n_workers
         self.batch_size = batch_size
-
-        if provider is None:
-            try:
-                provider = AzureOpenAIProvider(
-                    model_name=kwargs["model_name"], interactive=True
-                )
-            except KeyError:
-                raise RuntimeError(
-                    "If `provider` is not passed, `model_name` must be passed to initialize one!"
-                )
 
         super().__init__(data, agent_class, provider, n_retry, **kwargs)
 
@@ -266,7 +257,7 @@ class SeqProcessor(_Processor):
             in_q.task_done()
 
 
-class _ProcessorIterable(_Processor):
+class _ProcessorIterable(_Processor[A, P, Sequence]):
     """
     A batch processor which maps an Agent over elements of an iterable (usually a list[str]).
 
@@ -304,15 +295,13 @@ class ProcessorIterable(_ProcessorIterable, SeqProcessor):
     """
 
 
-class _ProcessorDF(_Processor):
+class _ProcessorDF(_Processor[A, P, pl.DataFrame]):
     """
     A Processor which operates on chunks of a polars dataframe.
     Each chunk must be independent, as state will not be maintained between agent calls.
 
     The main user-facing method after init is :func:`process()`
     """
-
-    data: pl.DataFrame
 
     def _iter(self) -> Iterator[pl.DataFrame]:
         return self.data.iter_slices(self.batch_size)

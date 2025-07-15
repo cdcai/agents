@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 Message = Union[dict[str, str], ChatCompletionMessage]
 
 P = TypeVar("P", bound="_Provider")
+A = TypeVar("A", bound="_Agent")
 
 
 @dataclass
