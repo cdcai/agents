@@ -13,7 +13,7 @@ class _Callback(metaclass=abc.ABCMeta):
     """
 
     @abc.abstractmethod
-    def __call__(self, cls: type[Agent], answer: str, scratchpad: str):
+    def __call__(self, cls: Agent, answer: str, scratchpad: str):
         """
         Primary method called by agent during callback process
 
