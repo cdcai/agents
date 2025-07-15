@@ -118,7 +118,7 @@ class _ToolCall(metaclass=abc.ABCMeta):
         if either fail, appends the error for re-prompt in the `errors` attribute, and skip evaluation.
         """
         try:
-            self.func: Callable = getattr(self.agent, self.func_name)
+            self.func = getattr(self.agent, self.func_name)
             assert self.func_name in self.agent._known_tools
         except (AttributeError, AssertionError):
             logger.warning(
@@ -201,12 +201,13 @@ class _Provider(metaclass=abc.ABCMeta):
 
     async def __aenter__(self):
         return self
-    
+
     async def __aexit__(self, exc_type, exc_value, traceback):
         """
         Close the provider, if necessary.
         """
         pass
+
 
 class _StoppingCondition(metaclass=abc.ABCMeta):
     """
@@ -303,10 +304,11 @@ class _Agent(metaclass=abc.ABCMeta):
     def reset(self):
         raise NotImplementedError()
 
+
 class _BatchAPIHelper(metaclass=abc.ABCMeta):
-    timeout : float = 2.
-    task : Task
-    batch_tasks : List[Task]
+    timeout: float = 2.0
+    task: Task
+    batch_tasks: List[Task]
 
     async def close(self):
         """

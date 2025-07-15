@@ -2,7 +2,7 @@ import asyncio
 import logging
 from abc import ABCMeta, abstractmethod
 from itertools import islice
-from typing import Any, Iterable, Iterator, Optional, Sequence, Tuple, Type
+from typing import Any, Iterable, Iterator, Optional, Sequence, Tuple, Type, List
 
 import polars as pl
 import tqdm.asyncio as tqdm
@@ -25,7 +25,7 @@ class _Processor(metaclass=ABCMeta):
         data: Iterable,
         agent_class: Type[Agent],
         provider: Optional[_Provider],
-        batch_size : int,
+        batch_size: int,
         n_retry: int = 5,
         **kwargs,
     ):
@@ -46,7 +46,7 @@ class _Processor(metaclass=ABCMeta):
         self.n_retry = n_retry
         self.agent_kwargs = kwargs
         self.provider = provider
-        self.agents = []
+        self.agents: List[Agent] = []
 
         # Parallel queues
         #                                idx, retries remaining, batch
@@ -164,9 +164,7 @@ class SeqProcessor(_Processor):
                     "If `provider` is not passed, `model_name` must be passed to initialize one!"
                 )
 
-        super().__init__(
-            data, agent_class, provider, n_retry, **kwargs
-        )
+        super().__init__(data, agent_class, provider, n_retry, **kwargs)
 
     async def process(self):
         # Either the workers we called for at init or the number of batches we have to process
@@ -177,7 +175,9 @@ class SeqProcessor(_Processor):
             f"[_process_parallel] processing {self.in_q.qsize()} queries on {n_workers} threads"
         )
 
-        self.pbar = tqdm.tqdm(total=self.in_q.qsize(), desc="Batch Processing", unit="Batch")
+        self.pbar = tqdm.tqdm(
+            total=self.in_q.qsize(), desc="Batch Processing", unit="Batch"
+        )
         workers = []
 
         for i in range(n_workers):
@@ -361,7 +361,9 @@ class AllCallProcessor(_Processor):
 
         logger.info(f"[_process_parallel] processing {self.in_q.qsize()} agents")
 
-        self.pbar = tqdm.tqdm(total=self.in_q.qsize(), desc="Batch Processing", unit="Batch")
+        self.pbar = tqdm.tqdm(
+            total=self.in_q.qsize(), desc="Batch Processing", unit="Batch"
+        )
         workers = []
 
         for idx, retries_left, agent in self.dequeue(self.in_q):
