@@ -68,7 +68,7 @@ class Agent(_Agent):
         # We default to Azure OpenAI here, but
         # we could also use something else as long as it follows the OpenAI API
         if provider is None:
-            self.provider = AzureOpenAIProvider(model_name=model_name)
+            self.provider = AzureOpenAIProvider(model_name=model_name, interactive=False)
         else:
             self.provider = provider
 

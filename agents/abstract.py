@@ -3,6 +3,7 @@ All abstract classes
 """
 
 import abc
+import asyncio
 import json
 import logging
 import os
@@ -198,6 +199,14 @@ class _Provider(metaclass=abc.ABCMeta):
     async def prompt_agent(self, ag: "_Agent", prompt: Any, **kwargs):
         pass
 
+    async def __aenter__(self):
+        return self
+    
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        """
+        Close the provider, if necessary.
+        """
+        pass
 
 class _StoppingCondition(metaclass=abc.ABCMeta):
     """
@@ -298,6 +307,18 @@ class _BatchAPIHelper(metaclass=abc.ABCMeta):
     timeout : float = 2.
     task : Task
     batch_tasks : List[Task]
+
+    async def close(self):
+        """
+        Close the batch API helper, canceling any running tasks
+        """
+        if self.task is not None:
+            self.task.cancel()
+        for t in self.batch_tasks:
+            t.cancel()
+
+            all_tasks = [self.task] + self.batch_tasks
+            await asyncio.gather(*all_tasks, return_exceptions=True)
 
     @abc.abstractmethod
     def register_provider(self, provider: _Provider):

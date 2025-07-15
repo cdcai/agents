@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 class OpenAIBatchAPIHelper(_BatchAPIHelper):
 
     provider : "AzureOpenAIBatchProvider"
+    # The time in seconds to wait before checking if a batch has been completed
+    api_timeout: int = 30
 
     def __init__(self, batch_size: int, n_workers : int = 1):
         self.batch_size = batch_size
@@ -37,8 +39,10 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper):
         self.pbar = tqdm.tqdm(
             desc="Active Batch Requests",
             bar_format="{desc}| {bar}| {n_fmt}/{total_fmt}",
-            total=self.n_workers
+            total=self.n_workers,
+            disable=provider.quiet
         )
+
         self.pbar_lock = asyncio.Lock()
         # Create a Semaphore to ensure only n_workers batches running concurrently
         self.lock = asyncio.Semaphore(self.n_workers)
@@ -53,64 +57,71 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper):
 
         It's started at init time if we select batch mode, and persists for the duration of the session.
         """
-        # TODO: this needs to be a handler that is submitted for each batch rathern than a running task
-        # if n workers were spun up, you only end up with ~n / 2 per worker which isn't efficient
+        logger.info("OpenAIBatchHelper opening.")
         while True:
-            # Define our batch and start the clock
-            batch = []
-            batch_poll_start = asyncio.get_running_loop().time()
+            try:
+                # Define our batch and start the clock
+                batch = []
+                batch_poll_start = asyncio.get_running_loop().time()
 
-            # Await new messages to load into the batch
-            # - Until we hit our max batch size, or
-            # - Until we've waited for the time indicated (default 2s)
-            while len(batch) <= self.batch_size:
-                time_remaining = self.timeout - (
-                    asyncio.get_running_loop().time() - batch_poll_start
-                )
-                if time_remaining <= 0.0:
-                    # We've waited long enough, send what we have in a batch
-                    break
-                try:
-                    req = await asyncio.wait_for(self.provider.batch_q.get(), timeout=0.1)
+                # Await new messages to load into the batch
+                # - Until we hit our max batch size, or
+                # - Until we've waited for the time indicated (default 2s)
+                while len(batch) <= self.batch_size:
+                    time_remaining = self.timeout - (
+                        asyncio.get_running_loop().time() - batch_poll_start
+                    )
+                    if time_remaining <= 0.0:
+                        # We've waited long enough, send what we have in a batch
+                        break
+                    try:
+                        req = await asyncio.wait_for(self.provider.batch_q.get(), timeout=0.1)
+                    except asyncio.TimeoutError:
+                        continue
                     batch.append(req)
                     self.provider.batch_q.task_done()
-                except asyncio.TimeoutError:
+                # Case: Nothing to submit
+                # - Just re-run until we do have items
+                if len(batch) == 0:
                     continue
-
-            # Case: Nothing to submit
-            # - Just re-run until we do
-            if len(batch) == 0:
-                continue
-            
-            # Submit a new batch if we don't already have too many running
-            async with self.lock:
-                self.batch_tasks.append(asyncio.create_task(self._batch_handler(batch)))
-
+                
+                async with self.lock:
+                    self.batch_tasks.append(asyncio.create_task(self._batch_handler(batch)))
+            except (asyncio.CancelledError, GeneratorExit):
+                # If the task was cancelled, we should exit the loop
+                logger.info("OpenAIBatchHelper closing.")
+                break
 
     async def _batch_handler(self, batch: List[ChatCompletionMessageParam]) -> None:
         """
         A handler method that submits the batch of tasks to OpenAI and retrieves the results
         when finished.
-
         """
-        # Otherwise: create our batch payload, send off to OpenAI, and wait for the results
         # Create batch file, send to OpenAI and execute
         batch_file = await self.provider.send_batch(batch)
         try:
             async with self.pbar_lock:
                 self.pbar.update(1)
-            batch_task = await self.provider.create_batch_task(batch_file)
+            batch_task = await self.provider.create_batch_task(batch_file, timeout=self.api_timeout)
             # Get results
             results = await self.provider.get_batch_results(batch_task)
             
             # Write out results to dict for agents to pick up
-            async with self.provider.batch_out_lock:
-                for result in results:
-                    self.provider.batch_out[result["custom_id"]] = ChatCompletion.model_validate(result["response"]["body"])
+            for result in results:
+                self.provider.batch_out[result["custom_id"]].set_result(ChatCompletion.model_validate(result["response"]["body"]))
+        except Exception as e:
+            # propagate the exception to the futures
+            for k,v in self.provider.batch_out.items():
+                if not v.done():
+                    # If the future is not done, set it to an exception
+                    logger.error(f"Batch task {k} failed with exception: {e}")
+                    v.set_exception(e)
+            raise e
         finally:
             async with self.pbar_lock:
                 self.pbar.update(-1)
                 self.pbar.refresh()
+
 class AzureOpenAIProvider(_Provider):
     """
     An Azure OpenAI Provider for language Agents.
@@ -267,6 +278,7 @@ class AzureOpenAIBatchProvider(AzureOpenAIProvider):
             batch_size: int = DEFAULT_BATCH_SIZE,
             n_workers : int = 1,
             batch_handler: Optional[OpenAIBatchAPIHelper] = None,
+            quiet: bool = False,
             **kwargs
         ):
         """
@@ -278,6 +290,7 @@ class AzureOpenAIBatchProvider(AzureOpenAIProvider):
         :param int batch_size: The maximum size of batches that should be sent to OpenAI at a time
         :param int n_workers: If `batch_handler` is not provided, the number of workers to run in parallel to process incoming requests (default: 1)
         :param OpenAIBatchAPIHelper batch_handler: (optional) An initialized batch handler which will be used to handle the inqueue of requests to send to openAI
+        :param bool quiet: If True, suppresses the tqdm progress bar output
         :param kwargs: Any keyword arguments to pass to OpenAI class
         
         """
@@ -286,15 +299,26 @@ class AzureOpenAIBatchProvider(AzureOpenAIProvider):
         self.batch_idx_lock = asyncio.Lock()
         self.endpoint_fn = self.query_batch_mode
         self.batch_q: asyncio.Queue[Dict] = asyncio.Queue()
-        self.batch_out: Dict[str, ChatCompletion] = {}
-        self.batch_out_lock = asyncio.Lock()
+        self.batch_out: Dict[str, asyncio.Future[ChatCompletion]] = {}
+        self.quiet = quiet
+
         if batch_handler is None:
             self.batch_handler = OpenAIBatchAPIHelper(batch_size=batch_size, n_workers=n_workers)
-        
+        else:
+            self.batch_handler = batch_handler
+
         # Register the batch handler and start the batch processing task
         self.batch_handler.register_provider(self)
 
         super().__init__(model_name, interactive, **kwargs)
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        """
+        Clean up the batch handler and any ongoing tasks
+        """
+        if hasattr(self, "batch_handler") and self.batch_handler is not None:
+            # Cancel the batch processing task
+            await self.batch_handler.close()
 
     async def query_batch_mode(
         self, messages: List[ChatCompletionMessageParam], model: str, **kwargs
@@ -311,21 +335,21 @@ class AzureOpenAIBatchProvider(AzureOpenAIProvider):
             "body": {"model": model, **kwargs, "messages": messages},
         }
 
+        # Create a future to hold the result
+        self.batch_out[task_id] = asyncio.get_running_loop().create_future()
+
+        # Put the task into the queue for processing
         await self.batch_q.put(task)
 
-        task_done = False
-        while not task_done:
-            try:
-                async with self.batch_out_lock:
-                    out = self.batch_out.pop(task_id)
-                task_done = True
-                if isinstance(out, Exception):
-                    # Propagate errors if we encountered any
-                    raise out
-            except KeyError:
-                # Poll every 5s for the response
-                await asyncio.sleep(5)
-                continue
+        # Await the result
+        out = await self.batch_out[task_id]
+        
+        # remove the future from the output dict
+        self.batch_out.pop(task_id, None)
+
+        # Propagate errors if we encountered any
+        if isinstance(out, Exception):
+            raise out
 
         return out
 
