@@ -1,12 +1,12 @@
 import asyncio
 import logging
 from copy import copy
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import openai
 from pydantic import BaseModel
 
-from ..abstract import _Agent
+from ..abstract import Message, _Agent
 from ..providers import AzureOpenAIProvider
 from ..stopping_conditions import StopOnDataModel
 
@@ -200,12 +200,12 @@ class Agent(_Agent):
 
         return out
 
-    def get_next_messages(self) -> list[dict[str, str]]:
+    def get_next_messages(self) -> List[Message]:
         """
         Retrieve next message payload for GPT prompting.
         This defaults to only the SYSTEM_PROMPT and the formatted BASE_PROMPT via format_prompt()
         """
-        out = [
+        out: List[Message] = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
             {"role": "system", "content": self.format_prompt()},
         ]

@@ -21,8 +21,7 @@ DEFAULT_BATCH_SIZE = 1000
 logger = logging.getLogger(__name__)
 
 
-class OpenAIBatchAPIHelper(_BatchAPIHelper):
-    provider: "AzureOpenAIBatchProvider"
+class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
     # The time in seconds to wait before checking if a batch has been completed
     api_timeout: int = 30
 

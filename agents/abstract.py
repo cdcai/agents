@@ -10,13 +10,28 @@ import os
 from asyncio import Task, create_task, to_thread
 from dataclasses import dataclass, field
 from inspect import iscoroutinefunction
-from typing import Any, Callable, Dict, List, Optional, Type, Union
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Generic,
+    List,
+    Optional,
+    Type,
+    TypeVar,
+    Union,
+)
 
 from openai.types.chat import ChatCompletionMessage
-from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion import ChatCompletion, Choice
 from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
+
+Message = Union[dict[str, str], ChatCompletionMessage]
+
+P = TypeVar("P", bound="_Provider")
 
 
 @dataclass
@@ -187,6 +202,8 @@ class _Provider(metaclass=abc.ABCMeta):
 
     "The tool_call class specific to this provider that will be used to evaluate any tool calls from the model"
     tool_call_wrapper: Type[_ToolCall]
+    "The method that will be used to call the OpenAI API, e.g. openai.chat.completions.create"
+    endpoint_fn: Callable[..., Awaitable[ChatCompletion]]
 
     def __init__(self, model_name: str, **kwargs):
         pass
@@ -235,7 +252,7 @@ class _Agent(metaclass=abc.ABCMeta):
     TOOLS: list
     CALLBACKS: list
     callback_output: list
-    tool_res_payload: list[dict]
+    tool_res_payload: List[Message]
     provider: _Provider
 
     def __init__(
@@ -277,7 +294,7 @@ class _Agent(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def get_next_messages(self) -> list[dict[str, str]]:
+    def get_next_messages(self) -> List[Message]:
         raise NotImplementedError()
 
     @abc.abstractmethod
@@ -305,10 +322,11 @@ class _Agent(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
 
-class _BatchAPIHelper(metaclass=abc.ABCMeta):
+class _BatchAPIHelper(Generic[P], metaclass=abc.ABCMeta):
     timeout: float = 2.0
     task: Task
     batch_tasks: List[Task]
+    provider: P
 
     async def close(self):
         """
@@ -323,7 +341,7 @@ class _BatchAPIHelper(metaclass=abc.ABCMeta):
             await asyncio.gather(*all_tasks, return_exceptions=True)
 
     @abc.abstractmethod
-    def register_provider(self, provider: _Provider):
+    def register_provider(self, provider: P):
         """
         Main method to link provider and start batching task via asyncio
         """
