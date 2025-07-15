@@ -10,7 +10,6 @@ import tqdm.asyncio as tqdm
 from .abstract import _Provider
 from .agent import Agent
 from .providers import AzureOpenAIProvider
-from .providers.openai import AzureOpenAIBatchProvider, OpenAIBatchAPIHelper
 
 logger = logging.getLogger(__name__)
 
