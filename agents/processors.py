@@ -134,7 +134,7 @@ class SeqProcessor(_Processor):
         self,
         data: Iterable,
         agent_class: Type[Agent],
-        provider: _Provider | None,
+        provider: Optional[_Provider] = None,
         batch_size: int = 5,
         n_workers: int = 1,
         n_retry: int = 5,

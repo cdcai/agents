@@ -4,7 +4,7 @@ Testing the OpenAI Batch API in a few different scenarios.
 
 import asyncio
 import logging
-from typing import List
+from typing import List, Optional
 
 import pydantic
 from dotenv import load_dotenv
@@ -47,7 +47,7 @@ class KnockKnockAgent(agents.StructuredOutputAgent):
 
     def __init__(
         self,
-        model_name: str | None = None,
+        model_name: Optional[str] = None,
         stopping_condition=None,
         provider=None,
         tools=None,
