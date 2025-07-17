@@ -8,7 +8,7 @@ with open("README.md", encoding="utf-8") as readme_file:
 
 setup(
     name="agents",
-    version="0.3.3",
+    version="0.4.0",
     description="Yet another langchain-esque package to use language agents and compose agent-systems",
     long_description=readme,
     long_description_content_type="text/markdown",
@@ -19,5 +19,5 @@ setup(
     license="MIT",
     packages=find_packages(include=["agents", "agents.*"]),
     install_requires=requirements,
-    tests_require=["pytest", "pytest-mock"],
+    tests_require=["pytest", "pytest-mock", "pytest_asyncio"],
 )

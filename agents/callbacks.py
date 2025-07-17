@@ -13,7 +13,7 @@ class _Callback(metaclass=abc.ABCMeta):
     """
 
     @abc.abstractmethod
-    def __call__(self, cls: type[Agent], answer: str, scratchpad: str):
+    def __call__(self, cls: Agent, answer: str, scratchpad: str):
         """
         Primary method called by agent during callback process
 
@@ -47,7 +47,7 @@ class AgentCallback(_Callback):
         self.agent_class = agent_class
         self.agent_kwargs = agent_kwargs
 
-    async def __call__(self, cls: type[Agent], answer: str, scratchpad: str) -> None:
+    async def __call__(self, cls: Agent, answer: str, scratchpad: str) -> None:
         """
         Run new callback agent on calling agent's answer and scratchpad and append output.
         """

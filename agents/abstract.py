@@ -3,23 +3,41 @@ All abstract classes
 """
 
 import abc
+import asyncio
 import json
 import logging
 import os
 from asyncio import Task, create_task, to_thread
 from dataclasses import dataclass, field
 from inspect import iscoroutinefunction
-from typing import Any, Callable, Dict, List, Optional, Type, Union
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Generic,
+    List,
+    Literal,
+    Optional,
+    Type,
+    TypeVar,
+    Union,
+)
 
 from openai.types.chat import ChatCompletionMessage
-from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion import ChatCompletion, Choice
 from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
 
+Message = Union[dict[str, str], ChatCompletionMessage]
+
+P = TypeVar("P", bound="_Provider")
+A = TypeVar("A", bound="_Agent")
+
 
 @dataclass
-class _ToolCall(metaclass=abc.ABCMeta):
+class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
     """
     A tool call abstract class which handles validation and execution of requested tool calls
     using asyncio.
@@ -35,7 +53,7 @@ class _ToolCall(metaclass=abc.ABCMeta):
     """
 
     "Agent instance calling the tool"
-    agent: "_Agent"
+    agent: A
 
     "The tool call object containing the tool id, name, and args"
     tool_call: Any
@@ -117,7 +135,7 @@ class _ToolCall(metaclass=abc.ABCMeta):
         if either fail, appends the error for re-prompt in the `errors` attribute, and skip evaluation.
         """
         try:
-            self.func: Callable = getattr(self.agent, self.func_name)
+            self.func = getattr(self.agent, self.func_name)
             assert self.func_name in self.agent._known_tools
         except (AttributeError, AssertionError):
             logger.warning(
@@ -178,7 +196,7 @@ class _ToolCall(metaclass=abc.ABCMeta):
         return self._construct_return_message(self.id, res)
 
 
-class _Provider(metaclass=abc.ABCMeta):
+class _Provider(Generic[A], metaclass=abc.ABCMeta):
     """
     A LLM Provider which should provide the standard methods for prompting and agent
     authenticating, etc.
@@ -186,6 +204,10 @@ class _Provider(metaclass=abc.ABCMeta):
 
     "The tool_call class specific to this provider that will be used to evaluate any tool calls from the model"
     tool_call_wrapper: Type[_ToolCall]
+    "The method that will be used to call the OpenAI API, e.g. openai.chat.completions.create"
+    endpoint_fn: Callable[..., Awaitable[ChatCompletion]]
+
+    mode: Literal["chat", "batch"]
 
     def __init__(self, model_name: str, **kwargs):
         pass
@@ -195,7 +217,16 @@ class _Provider(metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    async def prompt_agent(self, ag: "_Agent", prompt: Any, **kwargs):
+    async def prompt_agent(self, ag: A, prompt: Any, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        """
+        Close the provider, if necessary.
+        """
         pass
 
 
@@ -225,7 +256,7 @@ class _Agent(metaclass=abc.ABCMeta):
     TOOLS: list
     CALLBACKS: list
     callback_output: list
-    tool_res_payload: list[dict]
+    tool_res_payload: List[Message]
     provider: _Provider
 
     def __init__(
@@ -267,7 +298,7 @@ class _Agent(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def get_next_messages(self) -> list[dict[str, str]]:
+    def get_next_messages(self) -> List[Message]:
         raise NotImplementedError()
 
     @abc.abstractmethod
@@ -293,3 +324,29 @@ class _Agent(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def reset(self):
         raise NotImplementedError()
+
+
+class _BatchAPIHelper(Generic[P], metaclass=abc.ABCMeta):
+    timeout: float = 2.0
+    task: Task
+    batch_tasks: List[Task]
+    provider: P
+
+    async def close(self):
+        """
+        Close the batch API helper, canceling any running tasks
+        """
+        if self.task is not None:
+            self.task.cancel()
+        for t in self.batch_tasks:
+            t.cancel()
+
+            all_tasks = [self.task] + self.batch_tasks
+            await asyncio.gather(*all_tasks, return_exceptions=True)
+
+    @abc.abstractmethod
+    def register_provider(self, provider: P):
+        """
+        Main method to link provider and start batching task via asyncio
+        """
+        pass

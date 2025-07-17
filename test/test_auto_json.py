@@ -2,7 +2,6 @@ import pytest
 from pytest_mock import MockFixture
 import agents
 
-
 class DummyAgent(agents.Agent):
     @agents.agent_callable(
         "A tool the language agent can use",
