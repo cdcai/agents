@@ -17,6 +17,7 @@ from typing import (
     Dict,
     Generic,
     List,
+    Literal,
     Optional,
     Type,
     TypeVar,
@@ -36,7 +37,7 @@ A = TypeVar("A", bound="_Agent")
 
 
 @dataclass
-class _ToolCall(metaclass=abc.ABCMeta):
+class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
     """
     A tool call abstract class which handles validation and execution of requested tool calls
     using asyncio.
@@ -52,7 +53,7 @@ class _ToolCall(metaclass=abc.ABCMeta):
     """
 
     "Agent instance calling the tool"
-    agent: "_Agent"
+    agent: A
 
     "The tool call object containing the tool id, name, and args"
     tool_call: Any
@@ -195,7 +196,7 @@ class _ToolCall(metaclass=abc.ABCMeta):
         return self._construct_return_message(self.id, res)
 
 
-class _Provider(metaclass=abc.ABCMeta):
+class _Provider(Generic[A], metaclass=abc.ABCMeta):
     """
     A LLM Provider which should provide the standard methods for prompting and agent
     authenticating, etc.
@@ -206,6 +207,8 @@ class _Provider(metaclass=abc.ABCMeta):
     "The method that will be used to call the OpenAI API, e.g. openai.chat.completions.create"
     endpoint_fn: Callable[..., Awaitable[ChatCompletion]]
 
+    mode: Literal["chat", "batch"]
+
     def __init__(self, model_name: str, **kwargs):
         pass
 
@@ -214,7 +217,7 @@ class _Provider(metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    async def prompt_agent(self, ag: "_Agent", prompt: Any, **kwargs):
+    async def prompt_agent(self, ag: A, prompt: Any, **kwargs):
         pass
 
     async def __aenter__(self):

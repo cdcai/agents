@@ -1,21 +1,49 @@
 """
 Providers and Agents that track token and turn usage
-(experimental)
 """
 
 import logging
 from collections import namedtuple
-from typing import List, Union
+from functools import wraps
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Union,
+    Generic,
+    Literal,
+)
 
 import backoff
 import openai
 from openai.types import CompletionUsage
-from openai.types.chat import ChatCompletionMessageParam, ChatCompletion
+from openai.types.batch import Batch
+from openai.types.chat import ChatCompletionMessageParam
 
-from .providers import AzureOpenAIProvider
-from .agent import Agent
+
+from .agent import Agent as BaseAgent
+from .agent import StructuredOutputAgent as BaseStructuredOutputAgent
+from .agent import PredictionAgent as BasePredictionAgent
+from .agent import (
+    PredictionAgentWithJustification as BasePredictionAgentWithJustification,
+)
+from .providers import AzureOpenAIBatchProvider as BaseAzureOpenAIBatchProvider
+from .providers import AzureOpenAIProvider as BaseAzureOpenAIProvider
+from .providers.openai import _AzureProvider as _BaseAzureProvider
+from .providers.openai import ProviderMode
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "AzureOpenAIProvider",
+    "AzureOpenAIBatchProvider",
+    "Agent",
+    "StructuredOutputAgent",
+    "PredictionAgent",
+    "PredictionAgentWithJustification",
+]
 
 """
 LLM usage by agent / provider
@@ -31,6 +59,11 @@ LLMUsage = namedtuple(
 
 
 class Observable:
+    """
+    Observability methods and attributes needed for the provider and agent to track
+    token and round-trip usage
+    """
+
     all_usage: List[CompletionUsage]
     round_trips: int
 
@@ -55,36 +88,60 @@ class Observable:
             round_trips=self.round_trips,
         )
 
+    def round_trip_increment(self, f: Callable[..., Awaitable[Any]]):
+        """
+        A simple decorator that will wrap the method we will use as a
+        proxy for round trips (which will be different depending on whether we're using chat or batch endpoints)
+        """
 
-class ObservableAzureOpenAIProvider(AzureOpenAIProvider, Observable):
+        @wraps(f)
+        async def run_and_inc(*args, **kwds):
+            out = await f(*args, **kwds)
+            self.round_trips += 1
+            return out
+
+        return run_and_inc
+
+
+class _AzureProvider(
+    Generic[ProviderMode], _BaseAzureProvider["Agent", ProviderMode], Observable
+):
+    """
+    An Observable Azure OpenAI Provider for language Agents.
+
+    This provider generally assumes you already have all required environment variables
+    set correctly, or will provide them as kwargs which will be passed to AsyncAzureOpenAI at init
+
+    Namely:
+    - api_version or OPENAI_API_VERSION
+    - azure_endpoint or AZURE_OPENAI_ENDPOINT
+
+    AZURE_OPENAI_API_KEY will be assigned via authentication (either by ClientSecret or Interactive AD Auth depending on `interactive`)
+
+    Usage:
+
+    Usage at the provider level is tracked via the `usage` attribute.
+    """
+
+    mode: ProviderMode
+
     def __init__(self, model_name: str, interactive: bool, **kwargs):
+        """
+        Args:
+        :param str model_name: Model name from the deployments list to use
+        :param bool interactive: Should authentication use an Interactive AD Login (T), or ClientSecret (F)?
+        :param **kwargs: Any additional kw-args for AsyncAzureOpenAI
+        """
+        super().__init__(model_name, interactive, **kwargs)
         self.all_usage = []
         self.round_trips = 0
-        super().__init__(model_name, interactive, **kwargs)
 
     @backoff.on_exception(
         backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3
     )
-    async def _prompt_agent(self, prompt, **kwargs) -> ChatCompletion:
-        try:
-            res = await self.llm.chat.completions.create(
-                messages=prompt, model=self.model_name, **kwargs
-            )
-        except openai.AuthenticationError as e:
-            logger.info("Auth failed, attempting to re-authenticate before retrying")
-            self.authenticate()
-            raise e
-        except Exception as e:
-            # TODO: some error handling here
-            logger.debug(e)
-            raise e
-
-        return res
-
-    # TODO: Figure out a better approach than violating type safety
     async def prompt_agent(
         self,
-        ag: "AgentObservable",  # type: ignore[override]
+        ag: "Agent",
         prompt: Union[List[ChatCompletionMessageParam], ChatCompletionMessageParam],
         **kwargs,
     ):
@@ -109,14 +166,28 @@ class ObservableAzureOpenAIProvider(AzureOpenAIProvider, Observable):
                 ag.scratchpad += "\n" + msg["content"]
         ag.scratchpad += "\n-----------------------------------\n"
 
-        res = await self._prompt_agent(prompt, **kwargs)
-        out = res.choices[0]
+        try:
+            res = await self.endpoint_fn(
+                messages=prompt, model=self.model_name, **kwargs
+            )
+        except openai.AuthenticationError as e:
+            logger.info("Auth failed, attempting to re-authenticate before retrying")
+            self.authenticate()
+            raise e
+        except Exception as e:
+            # TODO: some error handling here
+            logger.debug(e)
+            raise e
 
+        out = res.choices[0]
+        # TODO: Fix how we're accomplishing this eventually, it's hacky to overload the whole method
+        # just to add two lines of code tracking tokens.
+        # One solution would be just changing the return of prompt_agent to the ChatCompletion object
+        # instead of Choice, so the token usage object isn't removed and we can choose to handle it
+        # or not via a wrapper. That's probably cleaner.
         if isinstance(res.usage, CompletionUsage):
             self.all_usage.append(res.usage)
             ag.all_usage.append(res.usage)
-
-        self.round_trips += 1
 
         ag.scratchpad += "--- Output --------------------------\n"
         ag.scratchpad += "Message:\n"
@@ -147,7 +218,27 @@ class ObservableAzureOpenAIProvider(AzureOpenAIProvider, Observable):
         return out
 
 
-class AgentObservable(Agent, Observable):
+class AzureOpenAIProvider(BaseAzureOpenAIProvider, _AzureProvider[Literal["chat"]]):
+    mode = "chat"
+
+    def __init__(self, model_name: str, interactive: bool, **kwargs):
+        super().__init__(model_name, interactive, **kwargs)
+        self.endpoint_fn = self.round_trip_increment(self.endpoint_fn)
+
+
+class AzureOpenAIBatchProvider(
+    BaseAzureOpenAIBatchProvider, _AzureProvider[Literal["batch"]]
+):
+    mode = "batch"
+
+    async def get_batch_results(self, batch: Batch) -> List[Dict]:
+        """
+        A patched version of get_batch_results that increments our round-trip count every call
+        """
+        return await self.round_trip_increment(super().get_batch_results)(batch)
+
+
+class Agent(BaseAgent, Observable):
     def __init__(
         self,
         stopping_condition,
@@ -171,6 +262,13 @@ class AgentObservable(Agent, Observable):
         )
 
     async def step(self):
-        out = await super().step()
-        self.round_trips += 1
-        return out
+        return await self.round_trip_increment(super().step)()
+
+
+class StructuredOutputAgent(BaseStructuredOutputAgent, Agent): ...
+
+
+class PredictionAgent(BasePredictionAgent, Agent): ...
+
+
+class PredictionAgentWithJustification(BasePredictionAgentWithJustification, Agent): ...

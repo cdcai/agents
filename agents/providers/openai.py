@@ -3,7 +3,7 @@ import json
 import logging
 import os
 from io import BytesIO, StringIO
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union, TypeVar, Generic
 
 import backoff
 import openai
@@ -13,10 +13,11 @@ from openai.types.batch import Batch
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 from openai.types.file_object import FileObject
 
-from ..abstract import _Agent, _BatchAPIHelper, _Provider
+from ..abstract import _BatchAPIHelper, _Provider, A
 from ..tools import OpenAIToolCall
 
 DEFAULT_BATCH_SIZE = 1000
+ProviderMode = TypeVar("ProviderMode", Literal["chat"], Literal["batch"])
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +131,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                 self.pbar.refresh()
 
 
-class AzureOpenAIProvider(_Provider):
+class _AzureProvider(Generic[A, ProviderMode], _Provider[A]):
     """
     An Azure OpenAI Provider for language Agents.
 
@@ -150,7 +151,7 @@ class AzureOpenAIProvider(_Provider):
 
     tool_call_wrapper = OpenAIToolCall
     llm: Union[openai.AsyncAzureOpenAI, openai.AsyncOpenAI]
-    mode: str = "chat"
+    mode: ProviderMode
 
     def __init__(
         self,
@@ -162,9 +163,6 @@ class AzureOpenAIProvider(_Provider):
         self.interactive = interactive
         self.authenticate()
         self.llm = openai.AsyncAzureOpenAI(**kwargs)
-        # Monkey-patching depending on selected mode
-        if self.mode == "chat":
-            self.endpoint_fn = self.llm.chat.completions.create
 
     def authenticate(self) -> None:
         """
@@ -197,7 +195,7 @@ class AzureOpenAIProvider(_Provider):
     )
     async def prompt_agent(
         self,
-        ag: _Agent,
+        ag: A,
         prompt: Union[List[ChatCompletionMessageParam], ChatCompletionMessageParam],
         **kwargs,
     ):
@@ -266,7 +264,15 @@ class AzureOpenAIProvider(_Provider):
         return out
 
 
-class AzureOpenAIBatchProvider(AzureOpenAIProvider):
+class AzureOpenAIProvider(_AzureProvider[A, Literal["chat"]]):
+    mode = "chat"
+
+    def __init__(self, model_name: str, interactive: bool, **kwargs):
+        super().__init__(model_name, interactive, **kwargs)
+        self.endpoint_fn = self.llm.chat.completions.create
+
+
+class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
     """
     Azure OpenAI using the Batch API
 
