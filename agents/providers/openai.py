@@ -109,6 +109,13 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
             batch_task = await self.provider.create_batch_task(
                 batch_file, timeout=self.api_timeout
             )
+
+            if batch_task.errors is not None and batch_task.errors.data is not None:
+                # Batch returned an error. Raise
+                errors = "\n".join(f"[{err.code}]: {err.message}" for err in batch_task.errors.data)
+                logger.error(f"Batch {batch_task.id} returned an error:\n{errors}")
+                raise RuntimeError(f"Batch {batch_task.id} returned an error:\n{errors}")
+            
             # Get results
             results = await self.provider.get_batch_results(batch_task)
 
@@ -122,7 +129,6 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
             for k, v in self.provider.batch_out.items():
                 if not v.done():
                     # If the future is not done, set it to an exception
-                    logger.error(f"Batch task {k} failed with exception: {e}")
                     v.set_exception(e)
             raise e
         finally:
