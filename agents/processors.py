@@ -133,7 +133,7 @@ class SeqProcessor(_Processor):
 
     def __init__(
         self,
-        data: Sequence,
+        data: DataInput,
         agent_class: Type[A],
         provider: _Provider,
         batch_size: int = 5,
