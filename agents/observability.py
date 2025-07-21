@@ -142,7 +142,10 @@ class _AzureProvider(
     async def prompt_agent(
         self,
         ag: "Agent",
-        prompt: Union[List[ChatCompletionMessageParam], ChatCompletionMessageParam],
+        prompt: Union[
+            List[ChatCompletionMessageParam],
+            ChatCompletionMessageParam,
+        ],
         **kwargs,
     ):
         """
@@ -159,12 +162,6 @@ class _AzureProvider(
         # the case where we just passed a single dict
         if not isinstance(prompt, list):
             prompt = [prompt]
-
-        ag.scratchpad += "--- Input ---------------------------\n"
-        for msg in prompt:
-            if "content" in msg and isinstance(msg["content"], str):
-                ag.scratchpad += "\n" + msg["content"]
-        ag.scratchpad += "\n-----------------------------------\n"
 
         try:
             res = await self.endpoint_fn(
@@ -189,9 +186,13 @@ class _AzureProvider(
             self.all_usage.append(res.usage)
             ag.all_usage.append(res.usage)
 
+        # HACK: OpenAI API can't handle None in a roundtrip
+        # so we have to patch the message content so it doesn't throw an error.
+        if out.message.content is None:
+            out.message.content = "<None>"
         ag.scratchpad += "--- Output --------------------------\n"
         ag.scratchpad += "Message:\n"
-        ag.scratchpad += out.message.content if out.message.content else "<None>" + "\n"
+        ag.scratchpad += out.message.content + "\n"
 
         if len(ag.TOOLS):
             # attempt to parse tool call arguments
@@ -204,9 +205,8 @@ class _AzureProvider(
                 out.finish_reason = "tool_calls"
                 # Append GPT response to next payload
                 # NOTE: This has to come before the next step of parsing
-                ag.tool_res_payload.append(out.message.model_dump())
+                ag.tool_res_payload.append(out.message)
 
-        ag.scratchpad += "\n-----------------------------------\n"
         logger.info(f"Received response: {out.message.content}")
 
         if out.finish_reason == "length":
@@ -215,6 +215,7 @@ class _AzureProvider(
                 "Response returned truncated from OpenAI due to token length.\n"
             )
             logger.warning("Message returned truncated.")
+        ag.scratchpad += "\n-----------------------------------\n"
         return out
 
 

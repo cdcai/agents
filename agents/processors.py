@@ -119,6 +119,7 @@ class _Processor(Generic[A, P, DataInput], metaclass=ABCMeta):
         while q.qsize() > 0:
             try:
                 it = q.get_nowait()
+                q.task_done()
                 out.append(it)
             except asyncio.QueueEmpty:
                 break
@@ -355,17 +356,17 @@ class AllCallProcessor(_Processor):
         )
         workers = []
 
-        for idx, retries_left, agent in self.dequeue(self.in_q):
-            workers.append(
-                asyncio.create_task(
-                    self._agent_handler(agent, idx, retries_left),
-                    name=f"agent-{idx}",
-                )
-            )
-
-        # Wait for all agents to complete
         try:
-            await self.pbar.gather(*workers)
+            while not self.in_q.empty():
+                for idx, retries_left, agent in self.dequeue(self.in_q):
+                    workers.append(
+                        asyncio.create_task(
+                            self._agent_handler(agent, idx, retries_left),
+                            name=f"agent-{idx}",
+                        )
+                    )
+                # Wait for all agents to complete
+                await asyncio.gather(*workers)
         finally:
             self.pbar.close()
 
@@ -373,6 +374,10 @@ class AllCallProcessor(_Processor):
             logger.warning(
                 f"[process] There were {self.error_tasks} unsucessful batches!"
             )
+
+        # Throw a wrench if nothing was successful.
+        if self.error_tasks == self.out_q.qsize():
+            raise RuntimeError("No agents were successful! Check the logs.")
 
         # De-queue into list from output queue
         out = []

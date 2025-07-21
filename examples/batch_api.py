@@ -9,7 +9,8 @@ from typing import List, Optional
 import pydantic
 from dotenv import load_dotenv
 
-import agents
+import agents.observability as agents
+from agents import agent_callable, BatchProcessorIterable
 
 load_dotenv()
 
@@ -67,7 +68,7 @@ class KnockKnockAgent(agents.StructuredOutputAgent):
             **fmt_kwargs,
         )
 
-    @agents.agent_callable(
+    @agent_callable(
         "Plan for how you'd write a knock-knock joke that would win in a competition.",
         {"text": "Your plan for the joke."},
     )
@@ -109,12 +110,13 @@ async def agents_example():
         "gpt-4o-batch", batch_size=5, n_workers=2
     ) as provider:
         # Kind of a hacky way to use this, but just for demonstration purposes
-        proc = agents.BatchProcessorIterable(
-            [i for i in range(10)], KnockKnockAgent, batch_size=1, provider=provider
+        proc = BatchProcessorIterable(
+            [i for i in range(10)], KnockKnockAgent, batch_size=1, provider=provider, n_retry=1
         )
 
         jokes = await proc.process()
 
+        usage = provider.usage
     print("Got the following entries:")
     print(
         "\n".join(
@@ -136,11 +138,12 @@ async def agents_example():
     best_joke_idx = judge.answer["labels"][0]
 
     print(
-        "The judge crowned a winner!\n\n{}".format(
+        "The judge crowned a winner!:\n\n{}".format(
             str(KnockKnock.model_validate(jokes[int(best_joke_idx)]))
         )
     )
 
+    print(f"Token usage: {usage}")
 
 if __name__ == "__main__":
     asyncio.run(agents_example())
