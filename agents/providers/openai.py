@@ -112,10 +112,14 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
 
             if batch_task.errors is not None and batch_task.errors.data is not None:
                 # Batch returned an error. Raise
-                errors = "\n".join(f"[{err.code}]: {err.message}" for err in batch_task.errors.data)
+                errors = "\n".join(
+                    f"[{err.code}]: {err.message}" for err in batch_task.errors.data
+                )
                 logger.error(f"Batch {batch_task.id} returned an error:\n{errors}")
-                raise RuntimeError(f"Batch {batch_task.id} returned an error:\n{errors}")
-            
+                raise RuntimeError(
+                    f"Batch {batch_task.id} returned an error:\n{errors}"
+                )
+
             # Get results
             results = await self.provider.get_batch_results(batch_task)
 
@@ -126,7 +130,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                 )
         except Exception as e:
             # propagate the exception to the futures
-            for k, v in self.provider.batch_out.items():
+            for _, v in self.provider.batch_out.items():
                 if not v.done():
                     # If the future is not done, set it to an exception
                     v.set_exception(e)
@@ -202,7 +206,10 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A]):
     async def prompt_agent(
         self,
         ag: A,
-        prompt: Union[List[ChatCompletionMessageParam], ChatCompletionMessageParam],
+        prompt: Union[
+            List[ChatCompletionMessageParam],
+            ChatCompletionMessageParam,
+        ],
         **kwargs,
     ):
         """
@@ -220,12 +227,6 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A]):
         if not isinstance(prompt, list):
             prompt = [prompt]
 
-        ag.scratchpad += "--- Input ---------------------------\n"
-        for msg in prompt:
-            if "content" in msg and isinstance(msg["content"], str):
-                ag.scratchpad += "\n" + msg["content"]
-        ag.scratchpad += "\n-----------------------------------\n"
-
         try:
             res = await self.endpoint_fn(
                 messages=prompt, model=self.model_name, **kwargs
@@ -234,16 +235,16 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A]):
             logger.info("Auth failed, attempting to re-authenticate before retrying")
             self.authenticate()
             raise e
-        except Exception as e:
-            # TODO: some error handling here
-            logger.debug(e)
-            raise e
 
         out = res.choices[0]
 
+        # HACK: OpenAI API can't handle None in a roundtrip
+        # so we have to patch the message content so it doesn't throw an error.
+        if out.message.content is None:
+            out.message.content = "<None>"
         ag.scratchpad += "--- Output --------------------------\n"
         ag.scratchpad += "Message:\n"
-        ag.scratchpad += out.message.content if out.message.content else "<None>" + "\n"
+        ag.scratchpad += out.message.content + "\n"
 
         if len(ag.TOOLS):
             # attempt to parse tool call arguments
@@ -253,12 +254,13 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A]):
                 and out.message.tool_calls
                 and len(out.message.tool_calls)
             ):
+                # Patch finish_reason if it was actually a tool call but didn't
+                # indicate it
                 out.finish_reason = "tool_calls"
                 # Append GPT response to next payload
                 # NOTE: This has to come before the next step of parsing
                 ag.tool_res_payload.append(out.message)
 
-        ag.scratchpad += "\n-----------------------------------\n"
         logger.info(f"Received response: {out.message.content}")
 
         if out.finish_reason == "length":
@@ -267,6 +269,9 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A]):
                 "Response returned truncated from OpenAI due to token length.\n"
             )
             logger.warning("Message returned truncated.")
+
+        ag.scratchpad += "\n-----------------------------------\n"
+
         return out
 
 
