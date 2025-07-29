@@ -175,7 +175,7 @@ class SeqProcessor(_Processor):
         for i in range(n_workers):
             workers.append(
                 asyncio.create_task(
-                    self._worker(f"llm_worker-{i}", self.in_q, self.out_q),
+                    self._worker(f"llm_worker-{i}"),
                     name=f"llm_worker-{i}",
                 )
             )
@@ -206,20 +206,18 @@ class SeqProcessor(_Processor):
 
     async def _worker(
         self,
-        worker_name: str,
-        in_q: asyncio.PriorityQueue,
-        out_q: asyncio.PriorityQueue,
+        worker_name: str
     ):
         """
         Agent worker
         """
         while True:
             try:
-                (id, retry_left, agent) = await in_q.get()
+                (id, retry_left, agent) = await self.in_q.get()
                 errored = False
-                answer = await agent(reset=True)
+                await agent(reset=True)
 
-                if len(answer) == 0:
+                if len(agent.answer) == 0:
                     logger.error(
                         f"[_worker - {worker_name}]: No answer was provided for query {id}"
                     )
@@ -235,6 +233,8 @@ class SeqProcessor(_Processor):
                 logger.error(f"[_worker - {worker_name}]: Task {id} failed, {str(e)}")
                 errored = True
 
+            self.in_q.task_done()
+
             if errored:
                 retry_left -= 1
                 if retry_left < 0:
@@ -242,20 +242,18 @@ class SeqProcessor(_Processor):
                     logger.error(
                         f"[_worker - {worker_name}]: Task {id} failed {self.n_retry} times and will not be retried"
                     )
-                    answer = self._placeholder(agent.fmt_kwargs["batch"])
+                    agent.answer = self._placeholder(agent.fmt_kwargs["batch"])
                     self.error_tasks += 1
                 else:
                     # Send data back to queue to retry processing
                     logger.info(
                         f"[_worker - {worker_name}]: Task {id} - {retry_left} retries remaining"
                     )
-                    await in_q.put((id, retry_left, agent))
-                    in_q.task_done()
+                    await self.in_q.put((id, retry_left, agent))
                     continue
 
-            await out_q.put((id, answer))
+            await self.out_q.put((id, agent))
             self.pbar.update()
-            in_q.task_done()
 
 
 class _ProcessorIterable(_Processor[A, P, Sequence]):
@@ -395,15 +393,17 @@ class AllCallProcessor(_Processor):
         """
         errored = False
         try:
-            answer = await agent(reset=True)
+            await agent(reset=True)
 
-            if len(answer) == 0:
+            if len(agent.answer) == 0:
                 logger.error(f"[_agent_handler]: No answer was provided for query {id}")
                 errored = True
 
         except Exception as e:
             logger.error(f"[_agent_handler]: Task {id} failed, {str(e)}")
             errored = True
+
+        self.in_q.task_done()
 
         if errored:
             retry_left -= 1
