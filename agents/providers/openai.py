@@ -67,7 +67,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                 # Await new messages to load into the batch
                 # - Until we hit our max batch size, or
                 # - Until we've waited for the time indicated (default 2s)
-                while len(batch) <= self.batch_size:
+                while len(batch) < self.batch_size:
                     time_remaining = self.timeout - (
                         asyncio.get_running_loop().time() - batch_poll_start
                     )
@@ -82,15 +82,14 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                         continue
                     batch.append(req)
                     self.provider.batch_q.task_done()
-                # Case: Nothing to submit
-                # - Just re-run until we do have items
-                if len(batch) == 0:
+                # Case: Nothing to submit or less than max items and we're still waiting for
+                # a semaphore
+                if len(batch) == 0 or (len(batch) < self.batch_size and self.lock.locked()):
                     continue
 
-                async with self.lock:
-                    self.batch_tasks.append(
-                        asyncio.create_task(self._batch_handler(batch))
-                    )
+                self.batch_tasks.append(
+                    asyncio.create_task(self._batch_handler(batch))
+                )
             except (asyncio.CancelledError, GeneratorExit):
                 # If the task was cancelled, we should exit the loop
                 logger.info("OpenAIBatchHelper closing.")
@@ -102,43 +101,44 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         when finished.
         """
         # Create batch file, send to OpenAI and execute
-        batch_file = await self.provider.send_batch(batch)
-        try:
-            async with self.pbar_lock:
-                self.pbar.update(1)
-            batch_task = await self.provider.create_batch_task(
-                batch_file, timeout=self.api_timeout
-            )
-
-            if batch_task.errors is not None and batch_task.errors.data is not None:
-                # Batch returned an error. Raise
-                errors = "\n".join(
-                    f"[{err.code}]: {err.message}" for err in batch_task.errors.data
-                )
-                logger.error(f"Batch {batch_task.id} returned an error:\n{errors}")
-                raise RuntimeError(
-                    f"Batch {batch_task.id} returned an error:\n{errors}"
+        async with self.lock:
+            batch_file = await self.provider.send_batch(batch)
+            try:
+                async with self.pbar_lock:
+                    self.pbar.update(1)
+                batch_task = await self.provider.create_batch_task(
+                    batch_file, timeout=self.api_timeout
                 )
 
-            # Get results
-            results = await self.provider.get_batch_results(batch_task)
+                if batch_task.errors is not None and batch_task.errors.data is not None:
+                    # Batch returned an error. Raise
+                    errors = "\n".join(
+                        f"[{err.code}]: {err.message}" for err in batch_task.errors.data
+                    )
+                    logger.error(f"Batch {batch_task.id} returned an error:\n{errors}")
+                    raise RuntimeError(
+                        f"Batch {batch_task.id} returned an error:\n{errors}"
+                    )
 
-            # Write out results to dict for agents to pick up
-            for result in results:
-                self.provider.batch_out[result["custom_id"]].set_result(
-                    ChatCompletion.model_validate(result["response"]["body"])
-                )
-        except Exception as e:
-            # propagate the exception to the futures
-            for _, v in self.provider.batch_out.items():
-                if not v.done():
-                    # If the future is not done, set it to an exception
-                    v.set_exception(e)
-            raise e
-        finally:
-            async with self.pbar_lock:
-                self.pbar.update(-1)
-                self.pbar.refresh()
+                # Get results
+                results = await self.provider.get_batch_results(batch_task)
+
+                # Write out results to dict for agents to pick up
+                for result in results:
+                    self.provider.batch_out[result["custom_id"]].set_result(
+                        ChatCompletion.model_validate(result["response"]["body"])
+                    )
+            except Exception as e:
+                # propagate the exception to the futures
+                for _, v in self.provider.batch_out.items():
+                    if not v.done():
+                        # If the future is not done, set it to an exception
+                        v.set_exception(e)
+                raise e
+            finally:
+                async with self.pbar_lock:
+                    self.pbar.update(-1)
+                    self.pbar.refresh()
 
 
 class _AzureProvider(Generic[A, ProviderMode], _Provider[A]):
