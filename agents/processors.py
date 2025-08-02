@@ -233,8 +233,6 @@ class SeqProcessor(_Processor):
                 logger.error(f"[_worker - {worker_name}]: Task {id} failed, {str(e)}")
                 errored = True
 
-            self.in_q.task_done()
-
             if errored:
                 retry_left -= 1
                 if retry_left < 0:
