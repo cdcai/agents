@@ -9,7 +9,6 @@ import logging
 import os
 from asyncio import Task, create_task, to_thread
 from dataclasses import dataclass, field
-from inspect import iscoroutinefunction
 from typing import (
     Any,
     Awaitable,
@@ -183,10 +182,7 @@ class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
             res = self.errors
         else:
             try:
-                if iscoroutinefunction(self.func):
-                    res = await self.func(**self.kwargs)
-                else:
-                    res = await to_thread(self.func, **self.kwargs)
+                res = await to_thread(self.func, **self.kwargs)
             except ValidationError as e:
                 # Case: Handle pydantic validation errors by passing them back to the
                 # model to correct
