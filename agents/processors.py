@@ -230,6 +230,8 @@ class SeqProcessor(_Processor):
                 logger.error(f"[_worker - {worker_name}]: Task {id} failed, {str(e)}")
                 errored = True
 
+            self.in_q.task_done()
+
             if errored:
                 retry_left -= 1
                 if retry_left < 0:
@@ -397,8 +399,6 @@ class AllCallProcessor(_Processor):
         except Exception as e:
             logger.error(f"[_agent_handler]: Task {id} failed, {str(e)}")
             errored = True
-
-        self.in_q.task_done()
 
         if errored:
             retry_left -= 1
