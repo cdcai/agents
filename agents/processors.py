@@ -204,10 +204,7 @@ class SeqProcessor(_Processor):
 
         return out
 
-    async def _worker(
-        self,
-        worker_name: str
-    ):
+    async def _worker(self, worker_name: str):
         """
         Agent worker
         """
