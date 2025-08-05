@@ -4,7 +4,7 @@ import logging
 import os
 from io import BytesIO, StringIO
 from typing import Dict, List, Literal, Optional, Tuple, Union, TypeVar, Generic
-
+from httpx import HttpxBinaryResponseContent
 import backoff
 import openai
 import tqdm.asyncio as tqdm
@@ -416,7 +416,9 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
 
         :return: An OpenAI File object representing the uploaded batch file
         """
-        file_name, file_content, mime_type = await asyncio.to_thread(self._create_batch_file, tasks)
+        file_name, file_content, mime_type = await asyncio.to_thread(
+            self._create_batch_file, tasks
+        )
         return await self.llm.files.create(
             file=(file_name, file_content, mime_type), purpose="batch", **kwargs
         )
@@ -463,16 +465,22 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         if batch.status != "completed" or batch.output_file_id is None:
             raise ValueError("Batch status was not 'completed'! Got: " + batch.status)
 
-        results = []
         result_stream = await self.llm.files.content(batch.output_file_id)
+        results = await asyncio.to_thread(
+            self._response_from_bytes, result_stream.content
+        )
+        return results
 
+    @staticmethod
+    def _response_from_bytes(stream: bytes) -> List[Dict]:
+        out = []
         with BytesIO() as buffer:
-            buffer.write(result_stream.content)
+            buffer.write(stream)
             result_text = buffer.getvalue().decode("utf-8")
             for line in result_text.splitlines():
-                results.append(json.loads(line))
+                out.append(json.loads(line))
 
-        return results
+        return out
 
 
 class OpenAIProvider(AzureOpenAIProvider):
