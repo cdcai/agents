@@ -416,7 +416,7 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
 
         :return: An OpenAI File object representing the uploaded batch file
         """
-        file_name, file_content, mime_type = self._create_batch_file(tasks)
+        file_name, file_content, mime_type = await asyncio.to_thread(self._create_batch_file, tasks)
         return await self.llm.files.create(
             file=(file_name, file_content, mime_type), purpose="batch", **kwargs
         )
