@@ -154,9 +154,8 @@ class SeqProcessor(_Processor):
         :param kwargs: Additional named arguments passed to `agent_class` on init
         """
         self.n_workers = n_workers
-        self.batch_size = batch_size
 
-        super().__init__(data, agent_class, provider, n_retry, **kwargs)
+        super().__init__(data, agent_class, provider, batch_size, n_retry, **kwargs)
 
     async def process(self):
         # Either the workers we called for at init or the number of batches we have to process
