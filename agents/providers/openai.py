@@ -3,15 +3,29 @@ import json
 import logging
 import os
 from io import BytesIO, StringIO
-from typing import Dict, Generic, List, Literal, Optional, Tuple, TypeVar, Union
+from typing import (
+    Dict,
+    Generic,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    TypeVar,
+    Union,
+    TypedDict,
+)
 
 import backoff
 import openai
 import tqdm.asyncio as tqdm
 from azure.identity import ClientSecretCredential, InteractiveBrowserCredential
-from openai.types.batch import Batch
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
-from openai.types.file_object import FileObject
+from openai.types import (
+    EmbeddingCreateParams,
+    CompletionCreateParams,
+    Batch,
+    FileObject,
+)
 
 from ..abstract import A, _BatchAPIHelper, _Provider
 from ..tools import OpenAIToolCall
@@ -20,6 +34,15 @@ DEFAULT_BATCH_SIZE = 1000
 ProviderMode = TypeVar("ProviderMode", Literal["chat"], Literal["batch"])
 
 logger = logging.getLogger(__name__)
+
+
+# HACK: OpenAI does not (yet) implement batch request input type
+# See: https://github.com/openai/openai-python/issues/1937
+class BatchRequestInput(TypedDict):
+    custom_id: str
+    method: Literal["POST"]
+    url: Literal["/v1/chat/completions", "/v1/embeddings", "/v1/completions"]
+    body: Union[EmbeddingCreateParams, CompletionCreateParams]
 
 
 class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
@@ -95,7 +118,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                 logger.info("OpenAIBatchHelper closing.")
                 break
 
-    async def _batch_handler(self, batch: List[ChatCompletionMessageParam]) -> None:
+    async def _batch_handler(self, batch: List[BatchRequestInput]) -> None:
         """
         A handler method that submits the batch of tasks to OpenAI and retrieves the results
         when finished.
@@ -130,11 +153,11 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                     )
             except Exception as e:
                 # propagate the exception to the futures
-                for _, v in self.provider.batch_out.items():
-                    if not v.done():
+                for batch_item in batch:
+                    fut = self.provider.batch_out[batch_item["custom_id"]]
+                    if not fut.done():
                         # If the future is not done, set it to an exception
-                        v.set_exception(e)
-                raise e
+                        fut.set_exception(e)
             finally:
                 async with self.pbar_lock:
                     self.pbar.update(-1)
@@ -384,7 +407,7 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
 
     @staticmethod
     def _create_batch_file(
-        tasks: List[ChatCompletionMessageParam],
+        tasks: List[BatchRequestInput],
     ) -> Tuple[str, bytes, str]:
         """
         Create a batch file for the OpenAI Batch API
@@ -405,7 +428,7 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
 
     async def send_batch(
         self,
-        tasks: List[ChatCompletionMessageParam],
+        tasks: List[BatchRequestInput],
         **kwargs,
     ) -> FileObject:
         """
