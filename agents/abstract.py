@@ -337,8 +337,8 @@ class _BatchAPIHelper(Generic[P], metaclass=abc.ABCMeta):
         for t in self.batch_tasks:
             t.cancel()
 
-            all_tasks = [self.task] + self.batch_tasks
-            await asyncio.gather(*all_tasks, return_exceptions=True)
+        all_tasks = [self.task] + self.batch_tasks
+        await asyncio.gather(*all_tasks, return_exceptions=True)
 
     @abc.abstractmethod
     def register_provider(self, provider: P):
