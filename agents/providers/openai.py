@@ -105,6 +105,13 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                         continue
                     batch.append(req)
                     self.provider.batch_q.task_done()
+
+                # Wait on the batch tasks
+                # DEBUG: Remove assigns later
+                finished_batches, processing_batches = await asyncio.wait(
+                    self.batch_tasks, timeout=self.timeout
+                )
+
                 # Case: Nothing to submit or less than max items and we're still waiting for
                 # a semaphore
                 if len(batch) == 0 or (
@@ -113,6 +120,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                     continue
 
                 self.batch_tasks.append(asyncio.create_task(self._batch_handler(batch)))
+
             except (asyncio.CancelledError, GeneratorExit):
                 # If the task was cancelled, we should exit the loop
                 logger.info("OpenAIBatchHelper closing.")

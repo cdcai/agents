@@ -353,14 +353,9 @@ class AllCallProcessor(_Processor):
         try:
             while not self.in_q.empty():
                 for idx, retries_left, agent in self.dequeue(self.in_q):
-                    workers.append(
-                        asyncio.create_task(
-                            self._agent_handler(agent, idx, retries_left),
-                            name=f"agent-{idx}",
-                        )
-                    )
+                    workers.append(self._agent_handler(agent, idx, retries_left))
                 # Wait for all agents to complete
-                await asyncio.gather(*workers)
+                await asyncio.wait(workers)
         finally:
             self.pbar.close()
 
