@@ -3,8 +3,8 @@ import json
 import logging
 import os
 from io import BytesIO, StringIO
-from typing import Dict, List, Literal, Optional, Tuple, Union, TypeVar, Generic
-from httpx import HttpxBinaryResponseContent
+from typing import Dict, Generic, List, Literal, Optional, Tuple, TypeVar, Union
+
 import backoff
 import openai
 import tqdm.asyncio as tqdm
@@ -13,7 +13,7 @@ from openai.types.batch import Batch
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 from openai.types.file_object import FileObject
 
-from ..abstract import _BatchAPIHelper, _Provider, A
+from ..abstract import A, _BatchAPIHelper, _Provider
 from ..tools import OpenAIToolCall
 
 DEFAULT_BATCH_SIZE = 1000
