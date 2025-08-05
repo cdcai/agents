@@ -290,7 +290,7 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A]):
                 out.finish_reason = "tool_calls"
                 # Append GPT response to next payload
                 # NOTE: This has to come before the next step of parsing
-                ag.tool_res_payload.append(out.message)
+                ag.tool_res_payload.append(out.message.model_dump())
 
         logger.info(f"Received response: {out.message.content}")
 

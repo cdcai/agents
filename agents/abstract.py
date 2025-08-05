@@ -23,13 +23,13 @@ from typing import (
     Union,
 )
 
-from openai.types.chat import ChatCompletionMessage
+from openai.types.chat import ChatCompletionMessageParam, ChatCompletionMessage
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
 
-Message = Union[dict[str, str], ChatCompletionMessage]
+Message = Union[dict[str, str], ChatCompletionMessageParam]
 
 P = TypeVar("P", bound="_Provider")
 A = TypeVar("A", bound="_Agent")
