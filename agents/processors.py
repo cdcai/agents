@@ -133,7 +133,7 @@ class SeqProcessor(_Processor):
 
     def __init__(
         self,
-        data: Sequence,
+        data: DataInput,
         agent_class: Type[A],
         provider: _Provider,
         batch_size: int = 5,
@@ -154,9 +154,8 @@ class SeqProcessor(_Processor):
         :param kwargs: Additional named arguments passed to `agent_class` on init
         """
         self.n_workers = n_workers
-        self.batch_size = batch_size
 
-        super().__init__(data, agent_class, provider, n_retry, **kwargs)
+        super().__init__(data, agent_class, provider, batch_size, n_retry, **kwargs)
 
     async def process(self):
         # Either the workers we called for at init or the number of batches we have to process
@@ -175,7 +174,7 @@ class SeqProcessor(_Processor):
         for i in range(n_workers):
             workers.append(
                 asyncio.create_task(
-                    self._worker(f"llm_worker-{i}", self.in_q, self.out_q),
+                    self._worker(f"llm_worker-{i}"),
                     name=f"llm_worker-{i}",
                 )
             )
@@ -204,22 +203,17 @@ class SeqProcessor(_Processor):
 
         return out
 
-    async def _worker(
-        self,
-        worker_name: str,
-        in_q: asyncio.PriorityQueue,
-        out_q: asyncio.PriorityQueue,
-    ):
+    async def _worker(self, worker_name: str):
         """
         Agent worker
         """
         while True:
             try:
-                (id, retry_left, agent) = await in_q.get()
+                (id, retry_left, agent) = await self.in_q.get()
                 errored = False
-                answer = await agent(reset=True)
+                await agent(reset=True)
 
-                if len(answer) == 0:
+                if len(agent.answer) == 0:
                     logger.error(
                         f"[_worker - {worker_name}]: No answer was provided for query {id}"
                     )
@@ -235,6 +229,8 @@ class SeqProcessor(_Processor):
                 logger.error(f"[_worker - {worker_name}]: Task {id} failed, {str(e)}")
                 errored = True
 
+            self.in_q.task_done()
+
             if errored:
                 retry_left -= 1
                 if retry_left < 0:
@@ -242,20 +238,18 @@ class SeqProcessor(_Processor):
                     logger.error(
                         f"[_worker - {worker_name}]: Task {id} failed {self.n_retry} times and will not be retried"
                     )
-                    answer = self._placeholder(agent.fmt_kwargs["batch"])
+                    agent.answer = self._placeholder(agent.fmt_kwargs["batch"])
                     self.error_tasks += 1
                 else:
                     # Send data back to queue to retry processing
                     logger.info(
                         f"[_worker - {worker_name}]: Task {id} - {retry_left} retries remaining"
                     )
-                    await in_q.put((id, retry_left, agent))
-                    in_q.task_done()
+                    await self.in_q.put((id, retry_left, agent))
                     continue
 
-            await out_q.put((id, answer))
+            await self.out_q.put((id, agent))
             self.pbar.update()
-            in_q.task_done()
 
 
 class _ProcessorIterable(_Processor[A, P, Sequence]):
@@ -359,14 +353,9 @@ class AllCallProcessor(_Processor):
         try:
             while not self.in_q.empty():
                 for idx, retries_left, agent in self.dequeue(self.in_q):
-                    workers.append(
-                        asyncio.create_task(
-                            self._agent_handler(agent, idx, retries_left),
-                            name=f"agent-{idx}",
-                        )
-                    )
+                    workers.append(self._agent_handler(agent, idx, retries_left))
                 # Wait for all agents to complete
-                await asyncio.gather(*workers)
+                await asyncio.wait(workers)
         finally:
             self.pbar.close()
 
@@ -395,9 +384,9 @@ class AllCallProcessor(_Processor):
         """
         errored = False
         try:
-            answer = await agent(reset=True)
+            await agent(reset=True)
 
-            if len(answer) == 0:
+            if len(agent.answer) == 0:
                 logger.error(f"[_agent_handler]: No answer was provided for query {id}")
                 errored = True
 
