@@ -9,7 +9,6 @@ import logging
 import os
 from asyncio import Task, create_task, to_thread
 from dataclasses import dataclass, field
-from inspect import iscoroutinefunction
 from typing import (
     Any,
     Awaitable,
@@ -24,13 +23,13 @@ from typing import (
     Union,
 )
 
-from openai.types.chat import ChatCompletionMessage
+from openai.types.chat import ChatCompletionMessageParam, ChatCompletionMessage
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
 
-Message = Union[dict[str, str], ChatCompletionMessage]
+Message = Union[dict[str, str], ChatCompletionMessageParam]
 
 P = TypeVar("P", bound="_Provider")
 A = TypeVar("A", bound="_Agent")
@@ -183,10 +182,7 @@ class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
             res = self.errors
         else:
             try:
-                if iscoroutinefunction(self.func):
-                    res = await self.func(**self.kwargs)
-                else:
-                    res = await to_thread(self.func, **self.kwargs)
+                res = await to_thread(self.func, **self.kwargs)
             except ValidationError as e:
                 # Case: Handle pydantic validation errors by passing them back to the
                 # model to correct
@@ -341,8 +337,8 @@ class _BatchAPIHelper(Generic[P], metaclass=abc.ABCMeta):
         for t in self.batch_tasks:
             t.cancel()
 
-            all_tasks = [self.task] + self.batch_tasks
-            await asyncio.gather(*all_tasks, return_exceptions=True)
+        all_tasks = [self.task] + self.batch_tasks
+        await asyncio.gather(*all_tasks, return_exceptions=True)
 
     @abc.abstractmethod
     def register_provider(self, provider: P):

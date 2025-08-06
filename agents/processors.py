@@ -154,9 +154,8 @@ class SeqProcessor(_Processor):
         :param kwargs: Additional named arguments passed to `agent_class` on init
         """
         self.n_workers = n_workers
-        self.batch_size = batch_size
 
-        super().__init__(data, agent_class, provider, n_retry, **kwargs)
+        super().__init__(data, agent_class, provider, batch_size, n_retry, **kwargs)
 
     async def process(self):
         # Either the workers we called for at init or the number of batches we have to process
@@ -204,10 +203,7 @@ class SeqProcessor(_Processor):
 
         return out
 
-    async def _worker(
-        self,
-        worker_name: str
-    ):
+    async def _worker(self, worker_name: str):
         """
         Agent worker
         """
@@ -357,14 +353,9 @@ class AllCallProcessor(_Processor):
         try:
             while not self.in_q.empty():
                 for idx, retries_left, agent in self.dequeue(self.in_q):
-                    workers.append(
-                        asyncio.create_task(
-                            self._agent_handler(agent, idx, retries_left),
-                            name=f"agent-{idx}",
-                        )
-                    )
+                    workers.append(self._agent_handler(agent, idx, retries_left))
                 # Wait for all agents to complete
-                await asyncio.gather(*workers)
+                await asyncio.wait(workers)
         finally:
             self.pbar.close()
 
@@ -402,8 +393,6 @@ class AllCallProcessor(_Processor):
         except Exception as e:
             logger.error(f"[_agent_handler]: Task {id} failed, {str(e)}")
             errored = True
-
-        self.in_q.task_done()
 
         if errored:
             retry_left -= 1
