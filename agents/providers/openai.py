@@ -632,9 +632,9 @@ class OpenAIProvider(AzureOpenAIProvider):
 
     def __init__(self, model_name: str, **kwargs):
         self.model_name = model_name
-        self.endpoint_fn = self.round_trip_increment(self.llm.chat.completions.create)
         self.authenticate()
         self.llm = openai.AsyncOpenAI(**kwargs)
+        self.endpoint_fn = self.round_trip_increment(self.llm.chat.completions.create)
 
     def authenticate(self):
         pass
