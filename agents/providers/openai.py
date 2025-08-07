@@ -275,7 +275,6 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
         self.model_name = model_name
         self.interactive = interactive
         self.authenticate()
-        self.llm = openai.AsyncAzureOpenAI(**kwargs)
 
     def authenticate(self) -> None:
         """
@@ -387,6 +386,7 @@ class AzureOpenAIProvider(_AzureProvider[A, Literal["chat"]]):
 
     def __init__(self, model_name: str, interactive: bool, **kwargs):
         super().__init__(model_name, interactive, **kwargs)
+        self.llm = openai.AsyncAzureOpenAI(**kwargs)
         self.endpoint_fn = self.round_trip_increment(self.llm.chat.completions.create)
 
 
@@ -623,16 +623,16 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         return out
 
 
-class OpenAIProvider(AzureOpenAIProvider):
+class OpenAIProvider(_AzureProvider[A, Literal["chat"]]):
     """
     Standard (non-Azure) OpenAI provider
 
     Requires `api_key` passed as a kwarg, or OPENAI_API_KEY set as an environment variable
     """
-
+    mode = "chat"
+    
     def __init__(self, model_name: str, **kwargs):
-        self.model_name = model_name
-        self.authenticate()
+        super().__init__(model_name=model_name, interactive=True, kwargs=kwargs)
         self.llm = openai.AsyncOpenAI(**kwargs)
         self.endpoint_fn = self.round_trip_increment(self.llm.chat.completions.create)
 
