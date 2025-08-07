@@ -4,7 +4,10 @@ Using models locally served via huggingface via an OpenAI interface
 from multiprocessing import Process
 
 from .openai import OpenAIProvider
+from typing import TYPE_CHECKING, Iterable
 
+if TYPE_CHECKING:
+    from openai.types.chat import ChatCompletionMessageParam
 try:
     import openai
 except ImportError as e:
@@ -34,16 +37,30 @@ class TransformersProvider(OpenAIProvider):
         for this provider, as everything runs locally.
 
         :param str model_name: The name of a huggingface model instance
-        :param str host: The name of the host for the huggingface serving instance
+        :param str host: The name of the host for the transformers serving instance
         :param int port: The port number of the host to serve the API
+        :param kwargs: Additional named arguments passed to transformers serving (see `transformers serve --help`)
         """
 
         xformers_kwargs = kwargs
         xformers_kwargs.update({"host": host, "port": port})
         self.xformers_kwargs = ServeArguments(**xformers_kwargs)
-
         base_url = f"http://{host}:{port}/v1"
         super().__init__(model_name, base_url=base_url, api_key="n/a")
+        self.endpoint_fn = self.round_trip_increment(self.chat_stream_to_response)
+
+    async def chat_stream_to_response(self, messages: Iterable[ChatCompletionMessageParam], **kwargs):
+        """
+        Transformers use a streaming response by default, so we have to accumulate it
+        """
+        stream_res = await self.llm.chat.completions.create(messages, **kwargs)
+
+        full_response_content = ""
+        for chunk in stream_res:
+            if chunk.choices[0].delta.content is not None:
+                full_response_content += chunk.choices[0].delta.content
+        
+        return full_response_content
 
     @staticmethod
     def _serving(args: ServeArguments):
