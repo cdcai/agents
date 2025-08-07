@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+from dataclasses import dataclass
 from io import BytesIO, StringIO
 from typing import (
     Dict,
@@ -10,25 +11,42 @@ from typing import (
     Literal,
     Optional,
     Tuple,
+    TypedDict,
     TypeVar,
     Union,
-    TypedDict,
 )
 
 import backoff
-import openai
-import tqdm.asyncio as tqdm
-from azure.identity import ClientSecretCredential, InteractiveBrowserCredential
-from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
-from openai.types import (
-    EmbeddingCreateParams,
-    CompletionCreateParams,
-    Batch,
-    FileObject,
-)
 
-from ..abstract import A, _BatchAPIHelper, _Provider
-from ..tools import OpenAIToolCall
+try:
+    import openai
+except ImportError as e:
+    raise ImportError(
+        f"OpenAI package must be installed to use an OpenAI provider!\n{str(e)}"
+    )
+import tqdm.asyncio as tqdm
+
+try:
+    from azure.identity import ClientSecretCredential, InteractiveBrowserCredential
+except ImportError as e:
+    raise ImportError(f"azure.identity is required for OpenAI providers!\n{str(e)}")
+
+from openai.types import (
+    Batch,
+    CompletionCreateParams,
+    EmbeddingCreateParams,
+    FileObject,
+    CompletionUsage,
+)
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionMessageParam,
+    ChatCompletionMessageToolCall,
+)
+from pydantic import BaseModel
+
+from ..abstract import A, _BatchAPIHelper, _Provider, _ToolCall
+from ..observability import LLMUsage, Observable
 
 DEFAULT_BATCH_SIZE = 1000
 ProviderMode = TypeVar("ProviderMode", Literal["chat"], Literal["batch"])
@@ -43,6 +61,33 @@ class BatchRequestInput(TypedDict):
     method: Literal["POST"]
     url: Literal["/v1/chat/completions", "/v1/embeddings", "/v1/completions"]
     body: Union[EmbeddingCreateParams, CompletionCreateParams]
+
+
+@dataclass
+class OpenAIToolCall(_ToolCall):
+    """
+    An encapsulating class for tool calls from an OpenAI lanaguge agent
+    """
+
+    tool_call: ChatCompletionMessageToolCall
+
+    @property
+    def id(self) -> str:
+        return self.tool_call.id
+
+    @property
+    def func_name(self) -> str:
+        return self.tool_call.function.name
+
+    @property
+    def arg_str(self) -> str:
+        return self.tool_call.function.arguments
+
+    @staticmethod
+    def _construct_return_message(
+        id: str, response: Union[str, BaseModel]
+    ) -> Dict[str, Union[str, BaseModel]]:
+        return {"tool_call_id": id, "role": "tool", "content": response}
 
 
 class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
@@ -183,7 +228,22 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                 self.pbar.refresh()
 
 
-class _AzureProvider(Generic[A, ProviderMode], _Provider[A]):
+class OpenAIObservable(Observable[CompletionUsage]):
+    @staticmethod
+    def usage_adapter(usage: Optional[CompletionUsage]) -> LLMUsage:
+        if usage is None:
+            out = LLMUsage()
+        else:
+            out = LLMUsage(
+                input_tok=usage.prompt_tokens,
+                output_tok=usage.completion_tokens,
+                total_tok=usage.total_tokens,
+                round_trips=1,
+            )
+        return out
+
+
+class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
     """
     An Azure OpenAI Provider for language Agents.
 
@@ -211,6 +271,7 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A]):
         interactive: bool,
         **kwargs,
     ):
+        super().__init__(model_name)
         self.model_name = model_name
         self.interactive = interactive
         self.authenticate()
@@ -280,6 +341,10 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A]):
 
         out = res.choices[0]
 
+        # Track usage at the provider level and agent level
+        self.all_usage.append(self.usage_adapter(res.usage))
+        ag.all_usage.append(self.usage_adapter(res.usage))
+
         # HACK: OpenAI API can't handle None in a roundtrip
         # so we have to patch the message content so it doesn't throw an error.
         if out.message.content is None:
@@ -322,7 +387,7 @@ class AzureOpenAIProvider(_AzureProvider[A, Literal["chat"]]):
 
     def __init__(self, model_name: str, interactive: bool, **kwargs):
         super().__init__(model_name, interactive, **kwargs)
-        self.endpoint_fn = self.llm.chat.completions.create
+        self.endpoint_fn = self.round_trip_increment(self.llm.chat.completions.create)
 
 
 class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
@@ -528,6 +593,14 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         :param batch: An OpenAI Batch object representing the completed batch
 
         :return: A list of results from the batch
+        """
+        # TODO: This is kind of silly and I don't know how useful this is
+        # over just manually writing the increment step
+        return await self.round_trip_increment(self._get_batch_results)(batch)
+
+    async def _get_batch_results(self, batch: Batch) -> List[Dict]:
+        """
+        Technical implementation of the wrapped funtion above
         """
         if batch.status != "completed" or batch.output_file_id is None:
             raise ValueError("Batch status was not 'completed'! Got: " + batch.status)
