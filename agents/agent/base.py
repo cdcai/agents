@@ -63,6 +63,16 @@ class Agent(_Agent):
         :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
         :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
         """
+        super().__init__(
+            stopping_condition,
+            model_name=None,
+            provider=None,
+            tools=None,
+            callbacks=None,
+            oai_kwargs=None,
+            **fmt_kwargs,
+        )
+
         self.fmt_kwargs = fmt_kwargs
         self.stopping_condition = stopping_condition
         # We default to Azure OpenAI here, but

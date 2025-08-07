@@ -10,6 +10,7 @@ import os
 from asyncio import Task, create_task, to_thread
 from dataclasses import dataclass, field
 from typing import (
+    TYPE_CHECKING,
     Any,
     Awaitable,
     Callable,
@@ -23,13 +24,16 @@ from typing import (
     Union,
 )
 
-from openai.types.chat import ChatCompletionMessageParam, ChatCompletionMessage
-from openai.types.chat.chat_completion import ChatCompletion, Choice
+if TYPE_CHECKING:
+    from openai.types.chat import ChatCompletionMessageParam, ChatCompletionMessage
+    from openai.types.chat.chat_completion import ChatCompletion, Choice
+
 from pydantic import BaseModel, ValidationError
+from .observability import Observable
 
 logger = logging.getLogger(__name__)
 
-Message = Union[dict[str, str], ChatCompletionMessageParam]
+Message = Union[dict[str, str], "ChatCompletionMessageParam"]
 
 P = TypeVar("P", bound="_Provider")
 A = TypeVar("A", bound="_Agent")
@@ -192,7 +196,7 @@ class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
         return self._construct_return_message(self.id, res)
 
 
-class _Provider(Generic[A], metaclass=abc.ABCMeta):
+class _Provider(Observable, Generic[A], metaclass=abc.ABCMeta):
     """
     A LLM Provider which should provide the standard methods for prompting and agent
     authenticating, etc.
@@ -201,11 +205,12 @@ class _Provider(Generic[A], metaclass=abc.ABCMeta):
     "The tool_call class specific to this provider that will be used to evaluate any tool calls from the model"
     tool_call_wrapper: Type[_ToolCall]
     "The method that will be used to call the OpenAI API, e.g. openai.chat.completions.create"
-    endpoint_fn: Callable[..., Awaitable[ChatCompletion]]
+    endpoint_fn: Callable[..., Awaitable["ChatCompletion"]]
 
     mode: Literal["chat", "batch"]
 
     def __init__(self, model_name: str, **kwargs):
+        super().__init__()
         pass
 
     @abc.abstractmethod
@@ -235,11 +240,11 @@ class _StoppingCondition(metaclass=abc.ABCMeta):
     """
 
     @abc.abstractmethod
-    def __call__(self, cls: "_Agent", response: Choice) -> Optional[Any]:
+    def __call__(self, cls: "_Agent", response: "Choice") -> Optional[Any]:
         raise NotImplementedError()
 
 
-class _Agent(metaclass=abc.ABCMeta):
+class _Agent(Observable, metaclass=abc.ABCMeta):
     terminated: bool = False
     truncated: bool = False
     curr_step: int = 1
@@ -265,6 +270,7 @@ class _Agent(metaclass=abc.ABCMeta):
         oai_kwargs: Optional[dict[str, Any]] = None,
         **fmt_kwargs,
     ):
+        super().__init__()
         pass
 
     @abc.abstractmethod
@@ -277,7 +283,7 @@ class _Agent(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def _check_stop_condition(self, response: ChatCompletionMessage) -> None:
+    def _check_stop_condition(self, response: "ChatCompletionMessage") -> None:
         """
         Called from within :func:`step()`.
         Checks whether our stop condition has been met and handles assignment of answer, if so.
@@ -298,7 +304,7 @@ class _Agent(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def _handle_tool_calls(self, response: Choice) -> None:
+    def _handle_tool_calls(self, response: "Choice") -> None:
         raise NotImplementedError()
 
     @property

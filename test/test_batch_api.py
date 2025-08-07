@@ -1,6 +1,7 @@
 """
 Test OpenAI batch API functionality
 """
+
 import asyncio
 import json
 import time
@@ -15,6 +16,7 @@ from openai.types import Batch, FileObject
 from pytest_mock import MockFixture
 
 import agents
+from agents.providers import AzureOpenAIBatchProvider
 
 # Mock returns
 mock_batch_file_ret = ("abc.txt", b"lorem ipsum", "application/json")
@@ -184,8 +186,8 @@ async def test_batch_api(mocker: MockFixture):
     aoi.files = AsyncFiles(aoi)
     aoi.batches = AsyncBatches(aoi)
 
-    mocker.patch.object(agents.AzureOpenAIBatchProvider, "authenticate", return_value=None)
-    provider = agents.AzureOpenAIBatchProvider("random_model", quiet=True)
+    mocker.patch.object(AzureOpenAIBatchProvider, "authenticate", return_value=None)
+    provider = AzureOpenAIBatchProvider("random_model", quiet=True)
 
     # Patch in mocked OAI API class
     provider.llm = aoi

@@ -1,6 +1,7 @@
 """
 Test experimental observability classes
 """
+
 import openai
 import pydantic
 import pytest
@@ -9,7 +10,9 @@ from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from pytest_mock import MockFixture
 
-import agents.observability as agents
+import agents
+from agents.providers import AzureOpenAIProvider, AzureOpenAIBatchProvider
+from agents.observability import LLMUsage
 from agents import StopNoOp
 
 # A mock OpenAI response
@@ -41,15 +44,9 @@ async def test_token_and_turn_tracking(mocker: MockFixture):
     Testing observable classes track tokens and turns correctly
     """
     openai.AsyncAzureOpenAI = mocker.Mock(spec=openai.AsyncAzureOpenAI)
-    mocker.patch.object(
-        agents.AzureOpenAIProvider,
-        "authenticate",
-        return_value=None
-    )
+    mocker.patch.object(AzureOpenAIProvider, "authenticate", return_value=None)
 
-    prov = agents.AzureOpenAIProvider(
-        "super_cool_model", interactive=True
-    )
+    prov = AzureOpenAIProvider("super_cool_model", interactive=True)
 
     prov.endpoint_fn = prov.round_trip_increment(dummy_endpoint)
     prov.model_name = "super_cool_model"
@@ -64,7 +61,7 @@ async def test_token_and_turn_tracking(mocker: MockFixture):
     await ag1.step()
 
     # Check that token and turn count updated in provider and agent
-    expected_counts = agents.LLMUsage(
+    expected_counts = LLMUsage(
         input_tok=7, output_tok=100, total_tok=107, round_trips=1
     )
     assert (
@@ -78,9 +75,7 @@ async def test_token_and_turn_tracking(mocker: MockFixture):
     await ag2.step()
 
     # Check that usage of first agent stayed the same and that provider now reflects both calls
-    expected_counts2 = agents.LLMUsage(
-        *map(lambda x: x * 2, expected_counts)
-    )
+    expected_counts2 = LLMUsage(*map(lambda x: x * 2, expected_counts))
     assert (
         expected_counts == ag1.usage
     ), f"Observable agent should not have been modified! got: {ag1.usage}"
@@ -96,11 +91,9 @@ def test_subclassing_observable(mocker: MockFixture):
     """
     Testing that one can subclass ObservableAgents
     """
-    _provider = mocker.Mock(spec=agents.AzureOpenAIProvider)
+    _provider = mocker.Mock(spec=AzureOpenAIProvider)
 
-    class ObservableStructuredOutputAgent(
-        agents.StructuredOutputAgent, agents.Agent
-    ):
+    class ObservableStructuredOutputAgent(agents.StructuredOutputAgent, agents.Agent):
         BASE_PROMPT = "Lorem ipsum"
 
     class Return(pydantic.BaseModel):
@@ -109,7 +102,5 @@ def test_subclassing_observable(mocker: MockFixture):
 
     ag = ObservableStructuredOutputAgent(Return, provider=_provider)
 
-    assert ag.usage == agents.LLMUsage(
-        input_tok=0, output_tok=0, total_tok=0, round_trips=0
-    )
+    assert ag.usage == LLMUsage(input_tok=0, output_tok=0, total_tok=0, round_trips=0)
     assert ag.round_trips == 0

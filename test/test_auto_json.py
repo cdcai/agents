@@ -1,6 +1,8 @@
-import pytest
 from pytest_mock import MockFixture
+
 import agents
+from agents.providers import AzureOpenAIProvider
+
 
 class DummyAgent(agents.Agent):
     @agents.agent_callable(
@@ -27,7 +29,7 @@ def test_json_payload_from_annotations(mocker: MockFixture) -> None:
     Testing that decorated methods correctly
     generate tools that can be used by an agent
     """
-    _provider = mocker.Mock(spec=agents.AzureOpenAIProvider)
+    _provider = mocker.Mock(spec=AzureOpenAIProvider)
 
     my_dummy = DummyAgent(agents.StopNoOp(), provider=_provider)
 
@@ -42,7 +44,7 @@ def test_json_payload_from_async_annotations(mocker: MockFixture) -> None:
     Testing that decorated async methods correctly
     generate tools that can be used by an agent
     """
-    _provider = mocker.Mock(spec=agents.AzureOpenAIProvider)
+    _provider = mocker.Mock(spec=AzureOpenAIProvider)
 
     my_dummy = AsyncDummyAgent(agents.StopNoOp(), provider=_provider)
 
