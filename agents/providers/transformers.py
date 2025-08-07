@@ -17,7 +17,7 @@ try:
 except ImportError as e:
     raise ImportError(f"The transformers package must be installed to use transformers provider!\n{str(e)}")
 
-from transformers.commands.serving import ServeCommand
+from transformers.commands.serving import ServeCommand, ServeArguments
 
 
 class TransformersProvider(OpenAIProvider):
@@ -38,17 +38,26 @@ class TransformersProvider(OpenAIProvider):
         :param int port: The port number of the host to serve the API
         """
 
-        self.xformers_kwargs = kwargs
-        self.xformers_kwargs.update({"host": host, "port": port})
+        xformers_kwargs = kwargs
+        xformers_kwargs.update({"host": host, "port": port})
+        self.xformers_kwargs = ServeArguments(**xformers_kwargs)
 
         base_url = f"http://{host}:{port}/v1"
         super().__init__(model_name, base_url=base_url, api_key="n/a")
+
+    @staticmethod
+    def _serving(args: ServeArguments):
+        """
+        Serve command that runs in separate process
+        """
+        serve_process = ServeCommand(args)
+        serve_process.run()
 
     def __aenter__(self):
         """
         Start the serving process
         """
-        self.serving_process = Process(target=ServeCommand, kwargs=self.xformers_kwargs)
+        self.serving_process = Process(target=self._serving, name="Transformers-Serving", args=[self.xformers_kwargs])
         self.serving_process.start()
         return super().__aenter__()
     
@@ -56,5 +65,6 @@ class TransformersProvider(OpenAIProvider):
         """
         End serving process
         """
+        self.serving_process.terminate()
         self.serving_process.join()
         return super().__aexit__(exc_type, exc_value, traceback)
