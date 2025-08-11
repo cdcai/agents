@@ -353,7 +353,7 @@ class AllCallProcessor(_Processor):
         try:
             while not self.in_q.empty():
                 for idx, retries_left, agent in self.dequeue(self.in_q):
-                    workers.append(self._agent_handler(agent, idx, retries_left))
+                    workers.append(asyncio.create_task(self._agent_handler(agent, idx, retries_left), name=f"batch-worker-{idx}"))
                 # Wait for all agents to complete
                 await asyncio.wait(workers)
         finally:
