@@ -579,10 +579,18 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
             logger.error(f"Attempt to process batch {batch_file.id} failed!")
             raise
 
-        while batch.status not in ["completed", "failed"]:
-            logger.info(f"Batch [{batch.id}] Status: {batch.status}")
-            batch = await self.llm.batches.retrieve(batch.id)
-            await asyncio.sleep(timeout)
+        try:
+            while batch.status not in ["completed", "failed"]:
+                logger.info(f"Batch [{batch.id}] Status: {batch.status}")
+                batch = await self.llm.batches.retrieve(batch.id)
+                await asyncio.sleep(timeout)
+
+        except Exception as e:
+            # Cancel batch before we terminate
+            if batch.status not in {"completed", "failed"}:
+                await self.llm.batches.cancel(batch.id)
+            logger.error(f"Error retrieving batch! {str(e)}")
+            raise e
 
         return batch
 
