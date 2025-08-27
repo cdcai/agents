@@ -190,7 +190,7 @@ class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
             except ValidationError as e:
                 # Case: Handle pydantic validation errors by passing them back to the
                 # model to correct
-                logger.warning("Failed Pydantic Validation.")
+                logger.debug("Failed Pydantic Validation.")
                 res = str(e)
 
         return self._construct_return_message(self.id, res)
@@ -259,6 +259,7 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
     callback_output: list
     tool_res_payload: List[Message]
     provider: _Provider
+    placeholder: Optional[Any]
 
     def __init__(
         self,
