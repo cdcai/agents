@@ -259,6 +259,7 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
     callback_output: list
     tool_res_payload: List[Message]
     provider: _Provider
+    placeholder: Optional[Any]
 
     def __init__(
         self,

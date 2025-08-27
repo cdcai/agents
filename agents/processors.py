@@ -101,6 +101,10 @@ class _Processor(Generic[A, P, DataInput], metaclass=ABCMeta):
         out = self.agent_class(
             provider=self.provider, **self.agent_kwargs, batch=batch_str, **kwargs
         )
+        # TODO: Hacky, patching issue where placeholder can't be composed from within agent_handler
+        # because we only have str-formatted batch at that point rather than the original data
+        out.placeholder = self._placeholder(batch)
+
         return out
 
     def _load_inqueue(self):
@@ -238,7 +242,7 @@ class SeqProcessor(_Processor):
                     logger.error(
                         f"[_worker - {worker_name}]: Task {id} failed {self.n_retry} times and will not be retried"
                     )
-                    agent.answer = self._placeholder(agent.fmt_kwargs["batch"])
+                    agent.answer = agent.placeholder
                     self.error_tasks += 1
                 else:
                     # Send data back to queue to retry processing
@@ -406,7 +410,7 @@ class AllCallProcessor(_Processor):
                 logger.error(
                     f"[_agent_handler]: Task {id} failed {self.n_retry} times and will not be retried"
                 )
-                agent.answer = self._placeholder(agent.fmt_kwargs["batch"])
+                agent.answer = agent.placeholder
                 self.error_tasks += 1
             else:
                 # Send data back to queue to retry processing
