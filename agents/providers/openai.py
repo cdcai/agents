@@ -191,6 +191,10 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                 self.provider.batch_out[result["custom_id"]].set_result(
                     ChatCompletion.model_validate(result["response"]["body"])
                 )
+            
+            # Log that we're done
+            logger.info(f"Batch [{batch_task.id}] completed.")
+
         except Exception as e:
             # propagate the exception to the futures
             for batch_item in batch:
@@ -562,14 +566,6 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
 
         :return: A list of results from the batch
         """
-        # TODO: This is kind of silly and I don't know how useful this is
-        # over just manually writing the increment step
-        return await self.round_trip_increment(self._get_batch_results)(batch)
-
-    async def _get_batch_results(self, batch: Batch) -> List[Dict]:
-        """
-        Technical implementation of the wrapped funtion above
-        """
         if batch.status != "completed" or batch.output_file_id is None:
             raise ValueError("Batch status was not 'completed'! Got: " + batch.status)
 
@@ -577,6 +573,10 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         results = await asyncio.to_thread(
             self._response_from_bytes, result_stream.content
         )
+        # TODO: Now this diverges from how we do it with a chat endpoint
+        # but maybe no reason to overcomplicate things.
+        self.round_trips += 1
+
         return results
 
     @staticmethod
