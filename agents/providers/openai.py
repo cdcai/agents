@@ -121,6 +121,8 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         """
         try:
             task.result()
+        except asyncio.CancelledError as e:
+            logger.info("Batch task was cancelled.")
         except Exception as e:
             logger.warning(f"Batch task resulted in an error: {str(e)}")
         finally:
