@@ -147,11 +147,11 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                     self.provider.batch_q.task_done()
 
                 # Wait for semaphore to send off batch task
-                async with self.lock:
-                    batch_task = asyncio.create_task(self._batch_handler(batch))
-                    self.batch_tasks.append(batch_task)
-                    # Batch task should remove itself from the list once it's done
-                    batch_task.add_done_callback(self.batch_tasks.remove)
+                await self.lock.acquire()
+                batch_task = asyncio.create_task(self._batch_handler(batch))
+                self.batch_tasks.append(batch_task)
+                # Batch task should remove itself from the list once it's done
+                batch_task.add_done_callback(self.batch_tasks.remove)
 
             except (asyncio.CancelledError, GeneratorExit):
                 # If the task was cancelled, we should exit the loop
@@ -203,6 +203,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
             raise e
 
         finally:
+            self.lock.release()
             self.pbar.update(-1)
             self.pbar.refresh()
 
@@ -510,7 +511,7 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
             file=(file_name, file_content, mime_type), purpose="batch", **kwargs
         )
 
-        logger.info(f"Created file [{file.id}] with {len(file_content)} queries.")
+        logger.info(f"Created file [{file.id}] with {len(tasks)} queries.")
 
         return file
 
