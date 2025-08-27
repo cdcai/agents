@@ -347,7 +347,7 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
                 # NOTE: This has to come before the next step of parsing
                 ag.tool_res_payload.append(out.message.model_dump())
 
-        logger.info(f"Received response: {out.message.content}")
+        logger.debug(f"Received response: {out.message.content}")
 
         if out.finish_reason == "length":
             ag.truncated = True
