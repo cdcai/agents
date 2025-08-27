@@ -115,6 +115,17 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         self.lock = asyncio.Semaphore(self.n_workers)
         self.task = asyncio.create_task(self._batcher(), name="OpenAIBatchHelper")
 
+    def _batch_handler_callback(self, task: asyncio.Task):
+        """
+        Simple callback handler for batch tasks
+        """
+        try:
+            task.result()
+        except Exception as e:
+            logger.warning(f"Batch task resulted in an error: {str(e)}")
+        finally:
+            self.batch_tasks.remove(task)
+
     async def _batcher(self):
         """
         Batch loop
@@ -148,10 +159,12 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
 
                 # Wait for semaphore to send off batch task
                 await self.lock.acquire()
+
                 batch_task = asyncio.create_task(self._batch_handler(batch))
                 self.batch_tasks.append(batch_task)
+
                 # Batch task should remove itself from the list once it's done
-                batch_task.add_done_callback(self.batch_tasks.remove)
+                batch_task.add_done_callback(self._batch_handler_callback)
 
             except (asyncio.CancelledError, GeneratorExit):
                 # If the task was cancelled, we should exit the loop
@@ -191,7 +204,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                 self.provider.batch_out[result["custom_id"]].set_result(
                     ChatCompletion.model_validate(result["response"]["body"])
                 )
-            
+
             # Log that we're done
             logger.info(f"Batch [{batch_task.id}] completed.")
 
