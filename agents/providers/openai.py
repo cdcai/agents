@@ -257,6 +257,7 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
 
     :param str model_name: Model name from the deployments list to use
     :param bool interactive: Should authentication use an Interactive AD Login (T), or ClientSecret (F)?
+    :param str resource_endpoint: The Azure API endpoint used to retrieve a bearer token in the auth flow
     :param **kwargs: Any additional kw-args for AsyncAzureOpenAI
     """
 
@@ -268,11 +269,13 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
         self,
         model_name: str,
         interactive: bool,
+        resource_endpoint: str = "https://cognitiveservices.azure.com/.default",
         **kwargs,
     ):
         super().__init__(model_name)
         self.model_name = model_name
         self.interactive = interactive
+        self.resource_endpoint = resource_endpoint
         self.authenticate()
         self.llm = openai.AsyncAzureOpenAI(**kwargs)
 
@@ -295,7 +298,7 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
             )
 
         os.environ["AZURE_OPENAI_API_KEY"] = credential.get_token(
-            "https://cognitiveservices.azure.com/.default"
+            self.resource_endpoint
         ).token
         os.environ["OPENAI_API_KEY"] = os.environ["AZURE_OPENAI_API_KEY"]
 
@@ -411,6 +414,7 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         n_workers: int = 1,
         batch_handler: Optional[OpenAIBatchAPIHelper] = None,
         quiet: bool = False,
+        resource_endpoint: str = "https://cognitiveservices.azure.com/.default",
         **kwargs,
     ):
         """
