@@ -30,7 +30,7 @@ class PredictionAgent(StructuredOutputAgent):
         expected_len: Optional[int] = None,
         stopping_condition: Optional[_StoppingCondition] = None,
         model_name: Optional[str] = None,
-        provider: Optional[Type[_Provider]] = None,
+        provider: Optional[_Provider] = None,
         tools: Optional[List[dict]] = None,
         callbacks: Optional[List[Callable]] = None,
         oai_kwargs: Optional[dict[str, Any]] = None,
@@ -44,7 +44,7 @@ class PredictionAgent(StructuredOutputAgent):
         :param int expected_len: Optional length constraint on the response_model (OpenAI API doesn't allow maxItems parameter in schema so this is checked post-hoc in the Pydantic BaseModel)
         :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task (optional)
         :param str model_name: Name of model to use (or deployment name for AzureOpenAI) (optional if provider is passed)
-        :param Type[_Provider] provider: Instantiated OpenAI instance to use (optional)
+        :param _Provider provider: Instantiated OpenAI instance to use (optional)
         :param List[dict] tools: List of tools the agent can call via response (optional)
         :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
         :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
