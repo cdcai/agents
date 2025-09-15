@@ -4,7 +4,7 @@ Sean Browning (oet5)
 """
 
 import logging
-from typing import Callable, List, Literal, Optional, Any, Type
+from typing import Callable, List, Literal, Optional, Any
 
 import pydantic
 
