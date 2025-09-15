@@ -63,6 +63,16 @@ class Agent(_Agent):
         :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
         :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
         """
+        super().__init__(
+            stopping_condition,
+            model_name=None,
+            provider=None,
+            tools=None,
+            callbacks=None,
+            oai_kwargs=None,
+            **fmt_kwargs,
+        )
+
         self.fmt_kwargs = fmt_kwargs
         self.stopping_condition = stopping_condition
         # We default to Azure OpenAI here, but
@@ -129,7 +139,7 @@ class Agent(_Agent):
         if (answer := self.stopping_condition(self, response)) is not None:
             self.answer = answer
             self.terminated = True
-            logger.info("Stopping condition signaled, terminating.")
+            logger.debug("Stopping condition signaled, terminating.")
 
     async def step(self):
         """
@@ -248,7 +258,7 @@ class Agent(_Agent):
             for payload, result in zip(tool_calls, tool_call_results):
                 # Log it
                 toolcall_str = f"{payload.func_name}({str(payload.kwargs)[:100] + '...(trunc)' if len(str(payload.kwargs)) > 100 else str(payload.kwargs)})"
-                logger.info(f"Got tool call: {toolcall_str}")
+                logger.debug(f"Got tool call: {toolcall_str}")
                 self.scratchpad += f"\t=> {toolcall_str}\n"
                 self.scratchpad += "\t\t"
 
