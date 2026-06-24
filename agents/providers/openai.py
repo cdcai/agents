@@ -264,6 +264,9 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
     tool_call_wrapper = OpenAIToolCall
     llm: Union[openai.AsyncAzureOpenAI, openai.AsyncOpenAI]
     mode: ProviderMode
+    model_name: str
+    interactive: bool
+    resource_endpoint: str
 
     def __init__(
         self,
@@ -277,11 +280,13 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
         self.interactive = interactive
         self.resource_endpoint = resource_endpoint
         self.authenticate()
-        self.llm = openai.AsyncAzureOpenAI(azure_ad_token_provider=self._bearer_token_generator, **kwargs)
+        self.llm = openai.AsyncAzureOpenAI(
+            azure_ad_token_provider=self._bearer_token_generator, **kwargs
+        )
 
     def authenticate(self) -> None:
         """
-        Retrieve Azure OpenAI API key via ClientSecret authentication and 
+        Retrieve Azure OpenAI API key via ClientSecret authentication and
         """
 
         credential = ClientSecretCredential(
@@ -291,13 +296,10 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
         )
 
         self._bearer_token_generator = get_bearer_token_provider(
-            credential,
-            self.resource_endpoint
+            credential, self.resource_endpoint
         )
 
-    @backoff.on_exception(
-        backoff.expo, openai.APIError, max_tries=3
-    )
+    @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3)
     async def prompt_agent(
         self,
         ag: A,
@@ -322,9 +324,7 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
         if not isinstance(prompt, list):
             prompt = [prompt]
 
-        res = await self.endpoint_fn(
-            messages=prompt, model=self.model_name, **kwargs
-        )
+        res = await self.endpoint_fn(messages=prompt, model=self.model_name, **kwargs)
 
         out = res.choices[0]
 
