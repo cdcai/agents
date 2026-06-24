@@ -27,7 +27,7 @@ except ImportError as e:
 import tqdm.asyncio as tqdm
 
 try:
-    from azure.identity import ClientSecretCredential, InteractiveBrowserCredential
+    from azure.identity.aio import ClientSecretCredential, get_bearer_token_provider
 except ImportError as e:
     raise ImportError(f"azure.identity is required for OpenAI providers!\n{str(e)}")
 
@@ -253,7 +253,7 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
     - api_version or OPENAI_API_VERSION
     - azure_endpoint or AZURE_OPENAI_ENDPOINT
 
-    AZURE_OPENAI_API_KEY will be assigned via authentication (either by ClientSecret or Interactive AD Auth depending on `interactive`)
+    A bearer token generator will be passed to the AsyncAzureOpenAI constructor so long running tasks will not fail due to token expiration.
 
     :param str model_name: Model name from the deployments list to use
     :param bool interactive: Should authentication use an Interactive AD Login (T), or ClientSecret (F)?
@@ -264,6 +264,9 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
     tool_call_wrapper = OpenAIToolCall
     llm: Union[openai.AsyncAzureOpenAI, openai.AsyncOpenAI]
     mode: ProviderMode
+    model_name: str
+    interactive: bool
+    resource_endpoint: str
 
     def __init__(
         self,
@@ -277,37 +280,26 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
         self.interactive = interactive
         self.resource_endpoint = resource_endpoint
         self.authenticate()
-        self.llm = openai.AsyncAzureOpenAI(**kwargs)
+        self.llm = openai.AsyncAzureOpenAI(
+            azure_ad_token_provider=self._bearer_token_generator, **kwargs
+        )
 
     def authenticate(self) -> None:
         """
-        Retrieve Azure OpenAI API key via Interactive AD Login or ClientSecret authentication
-        (Interactive is not suggested for long-running tasks, since key expires every hour)
-
-        :returns: API key assigned to `AZURE_OPENAI_API_KEY` and `OPENAI_API_KEY` environ variables
+        Retrieve Azure OpenAI API key via ClientSecret authentication and
         """
-        credential: Union[InteractiveBrowserCredential, ClientSecretCredential]
 
-        if self.interactive:
-            credential = InteractiveBrowserCredential()
-        else:
-            credential = ClientSecretCredential(
-                tenant_id=os.environ["SP_TENANT_ID"],
-                client_id=os.environ["SP_CLIENT_ID"],
-                client_secret=os.environ["SP_CLIENT_SECRET"],
-            )
+        credential = ClientSecretCredential(
+            tenant_id=os.environ["SP_TENANT_ID"],
+            client_id=os.environ["SP_CLIENT_ID"],
+            client_secret=os.environ["SP_CLIENT_SECRET"],
+        )
 
-        os.environ["AZURE_OPENAI_API_KEY"] = credential.get_token(
-            self.resource_endpoint
-        ).token
-        os.environ["OPENAI_API_KEY"] = os.environ["AZURE_OPENAI_API_KEY"]
+        self._bearer_token_generator = get_bearer_token_provider(
+            credential, self.resource_endpoint
+        )
 
-        if getattr(self, "llm", None) is not None:
-            self.llm.api_key = os.environ["AZURE_OPENAI_API_KEY"]
-
-    @backoff.on_exception(
-        backoff.expo, (openai.APIError, openai.AuthenticationError), max_tries=3
-    )
+    @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3)
     async def prompt_agent(
         self,
         ag: A,
@@ -332,14 +324,7 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
         if not isinstance(prompt, list):
             prompt = [prompt]
 
-        try:
-            res = await self.endpoint_fn(
-                messages=prompt, model=self.model_name, **kwargs
-            )
-        except openai.AuthenticationError as e:
-            logger.info("Auth failed, attempting to re-authenticate before retrying")
-            self.authenticate()
-            raise e
+        res = await self.endpoint_fn(messages=prompt, model=self.model_name, **kwargs)
 
         out = res.choices[0]
 

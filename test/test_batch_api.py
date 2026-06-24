@@ -187,6 +187,7 @@ async def test_batch_api(mocker: MockFixture):
     aoi.batches = AsyncBatches(aoi)
 
     mocker.patch.object(AzureOpenAIBatchProvider, "authenticate", return_value=None)
+    AzureOpenAIBatchProvider._bearer_token_generator = "lorem ipsum"
     provider = AzureOpenAIBatchProvider("random_model", quiet=True)
 
     # Patch in mocked OAI API class
