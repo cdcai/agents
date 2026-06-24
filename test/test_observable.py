@@ -46,7 +46,7 @@ async def test_token_and_turn_tracking(mocker: MockFixture):
     openai.AsyncAzureOpenAI = mocker.Mock(spec=openai.AsyncAzureOpenAI)
     mocker.patch.object(AzureOpenAIProvider, "authenticate", return_value=None)
 
-    prov = AzureOpenAIProvider("super_cool_model", interactive=True)
+    prov = AzureOpenAIProvider("super_cool_model")
 
     prov.endpoint_fn = prov.round_trip_increment(dummy_endpoint)
     prov.model_name = "super_cool_model"

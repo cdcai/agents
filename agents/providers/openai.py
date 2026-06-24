@@ -256,7 +256,6 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
     A bearer token generator will be passed to the AsyncAzureOpenAI constructor so long running tasks will not fail due to token expiration.
 
     :param str model_name: Model name from the deployments list to use
-    :param bool interactive: Should authentication use an Interactive AD Login (T), or ClientSecret (F)?
     :param str resource_endpoint: The Azure API endpoint used to retrieve a bearer token in the auth flow
     :param **kwargs: Any additional kw-args for AsyncAzureOpenAI
     """
@@ -268,13 +267,11 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
     def __init__(
         self,
         model_name: str,
-        interactive: bool,
         resource_endpoint: str = "https://cognitiveservices.azure.com/.default",
         **kwargs,
     ):
         super().__init__(model_name)
         self.model_name = model_name
-        self.interactive = interactive
         self.resource_endpoint = resource_endpoint
         self.authenticate()
         self.llm = openai.AsyncAzureOpenAI(azure_ad_token_provider=self._bearer_token_generator, **kwargs)
@@ -372,8 +369,8 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
 class AzureOpenAIProvider(_AzureProvider[A, Literal["chat"]]):
     mode = "chat"
 
-    def __init__(self, model_name: str, interactive: bool, **kwargs):
-        super().__init__(model_name, interactive, **kwargs)
+    def __init__(self, model_name: str, **kwargs):
+        super().__init__(model_name, **kwargs)
         self.endpoint_fn = self.round_trip_increment(self.llm.chat.completions.create)
 
 
@@ -394,7 +391,6 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         self,
         model_name: str,
         *,
-        interactive: bool = False,
         batch_size: int = DEFAULT_BATCH_SIZE,
         n_workers: int = 1,
         batch_handler: Optional[OpenAIBatchAPIHelper] = None,
@@ -407,7 +403,6 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         can be sent at once, and the price/request is generally around half of the standard chat endpoint.
 
         :param str model_name: The name of an Azure OpenAI deployment (note: must be a batch-capable model, such as gpt-4o-batch)
-        :param bool interactive: Should the requests be run in interactive mode using EntraID credentials
         :param int batch_size: The maximum size of batches that should be sent to OpenAI at a time
         :param int n_workers: If `batch_handler` is not provided, the number of workers to run in parallel to process incoming requests (default: 1)
         :param OpenAIBatchAPIHelper batch_handler: (optional) An initialized batch handler which will be used to handle the inqueue of requests to send to openAI
@@ -433,7 +428,7 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         # Register the batch handler and start the batch processing task
         self.batch_handler.register_provider(self)
 
-        super().__init__(model_name, interactive, **kwargs)
+        super().__init__(model_name, **kwargs)
 
     async def __aexit__(self, exc_type, exc_value, traceback):
         """

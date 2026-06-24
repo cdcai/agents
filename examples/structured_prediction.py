@@ -57,10 +57,8 @@ class QAnswerer(agents.StructuredOutputAgent):
     """
 
 if __name__ == "__main__":
-    # Run this with Interactive OAuth
     prov = agents.AzureOpenAIProvider(
-        "gpt-4o-mini-nofilter",
-        interactive=True
+        "gpt-4o-mini-nofilter"
     )
 
     # For Non-Azure:

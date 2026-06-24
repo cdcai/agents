@@ -40,10 +40,8 @@ class DummyEvaluatorAgent(agents.Agent):
 
 if __name__ == "__main__":
 
-    # Run this with Interactive OAuth
     prov = agents.AzureOpenAIProvider(
         "gpt-4o-mini-nofilter",
-        interactive=True
     )
 
     # For Non-Azure:

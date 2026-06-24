@@ -9,8 +9,9 @@ from typing import List, Optional
 import pydantic
 from dotenv import load_dotenv
 
-import agents.observability as agents
+import agents
 from agents import agent_callable, BatchProcessorIterable
+from agents.providers import AzureOpenAIBatchProvider, AzureOpenAIProvider
 
 load_dotenv()
 
@@ -106,7 +107,7 @@ class KnockKnockJudge(agents.PredictionAgent):
         super().__init__(labels=labels, provider=provider, **fmt_kwargs)
 
 async def agents_example():
-    async with agents.AzureOpenAIBatchProvider(
+    async with AzureOpenAIBatchProvider(
         "gpt-4o-batch", batch_size=5, n_workers=2
     ) as provider:
         # Kind of a hacky way to use this, but just for demonstration purposes
@@ -129,8 +130,8 @@ async def agents_example():
     judge = KnockKnockJudge(
         [str(KnockKnock.model_validate(joke)) for joke in jokes],
         # Chat provider since it's a single call
-        provider=agents.AzureOpenAIProvider(
-            model_name="gpt-4o-nofilter", interactive=False
+        provider=AzureOpenAIProvider(
+            model_name="gpt-4o-nofilter"
         ),
     )
 
