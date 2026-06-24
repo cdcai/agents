@@ -12,7 +12,7 @@ setup(
     description="Yet another langchain-esque package to use language agents and compose agent-systems",
     long_description=readme,
     long_description_content_type="text/markdown",
-    python_requires=">=3.9",
+    python_requires=">=3.10",
     url="https://github.com/cdcai/multiagent",
     author="Sean Browning",
     author_email="sbrowning@cdc.gov",
