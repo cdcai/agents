@@ -9,6 +9,7 @@ import logging
 import os
 from asyncio import Task, create_task, to_thread
 from dataclasses import dataclass, field
+from inspect import iscoroutinefunction
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -25,10 +26,11 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    from openai.types.chat import ChatCompletionMessageParam, ChatCompletionMessage
+    from openai.types.chat import ChatCompletionMessage, ChatCompletionMessageParam
     from openai.types.chat.chat_completion import ChatCompletion, Choice
 
 from pydantic import BaseModel, ValidationError
+
 from .observability import Observable
 
 logger = logging.getLogger(__name__)
@@ -103,7 +105,7 @@ class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
     @staticmethod
     @abc.abstractmethod
     def _construct_return_message(
-        id: str, respose: Union[str, BaseModel]
+        id: str, response: Union[str, BaseModel]
     ) -> Dict[str, Union[str, BaseModel]]:
         """
         A function that constructs the provider-appropriate return message for the tool call.
@@ -185,8 +187,13 @@ class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
         if self.errors is not None:
             res = self.errors
         else:
+            if iscoroutinefunction(self.func):
+                call = self.func(**self.kwargs)
+            else:
+                call = to_thread(self.func, **self.kwargs)
+
             try:
-                res = await to_thread(self.func, **self.kwargs)
+                res = await call
             except ValidationError as e:
                 # Case: Handle pydantic validation errors by passing them back to the
                 # model to correct
