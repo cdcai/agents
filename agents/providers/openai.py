@@ -455,7 +455,7 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         task = {
             "custom_id": task_id,
             "method": "POST",
-            "url": "/chat/completions",
+            "url": "/v1/chat/completions",
             "body": {"model": model, **kwargs, "messages": messages},
         }
 
