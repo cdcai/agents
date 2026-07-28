@@ -34,9 +34,9 @@ except ImportError as e:
 from openai.types import (
     Batch,
     CompletionCreateParams,
+    CompletionUsage,
     EmbeddingCreateParams,
     FileObject,
-    CompletionUsage,
 )
 from openai.types.chat import (
     ChatCompletion,
@@ -52,7 +52,6 @@ DEFAULT_BATCH_SIZE = 1000
 ProviderMode = TypeVar("ProviderMode", Literal["chat"], Literal["batch"])
 
 logger = logging.getLogger(__name__)
-
 
 # HACK: OpenAI does not (yet) implement batch request input type
 # See: https://github.com/openai/openai-python/issues/1937
@@ -290,9 +289,9 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
         """
 
         credential = ClientSecretCredential(
-            tenant_id=os.environ["SP_TENANT_ID"],
-            client_id=os.environ["SP_CLIENT_ID"],
-            client_secret=os.environ["SP_CLIENT_SECRET"],
+            tenant_id=os.environ["AZURE_TENANT_ID"],
+            client_id=os.environ["AZURE_CLIENT_ID"],
+            client_secret=os.environ["AZURE_CLIENT_SECRET"],
         )
 
         self._bearer_token_generator = get_bearer_token_provider(
@@ -455,7 +454,7 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         task = {
             "custom_id": task_id,
             "method": "POST",
-            "url": "/chat/completions",
+            "url": "/v1/chat/completions",
             "body": {"model": model, **kwargs, "messages": messages},
         }
 
