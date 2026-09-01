@@ -5,7 +5,7 @@ Test OpenAI Batch API helper lifecycle and result dispatch.
 import asyncio
 from types import SimpleNamespace
 from typing import Literal
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from openai.types import Batch, FileObject
@@ -95,7 +95,6 @@ def make_dispatch_helper(results):
     helper = OpenAIBatchAPIHelper(batch_size=10)
     helper.provider = provider
     helper.lock = asyncio.Semaphore(0)
-    helper.pbar = Mock()
     return helper, provider
 
 
@@ -194,7 +193,6 @@ async def test_close_during_batch_collection_accounts_for_first_request():
         assert provider.batch_out == {}
     finally:
         await helper.close()
-        helper.pbar.close()
 
 
 @pytest.mark.asyncio
@@ -219,7 +217,6 @@ async def test_close_during_semaphore_wait_cancels_unsubmitted_requests():
         assert future.cancelled()
     finally:
         await helper.close()
-        helper.pbar.close()
 
 
 @pytest.mark.asyncio
@@ -250,7 +247,6 @@ async def test_close_awaits_in_flight_handlers_and_is_repeatable():
         await asyncio.wait_for(provider.batch_q.join(), timeout=1)
     finally:
         await helper.close()
-        helper.pbar.close()
 
 
 @pytest.mark.asyncio
@@ -280,7 +276,6 @@ async def test_concurrent_close_does_not_interrupt_remote_cancellation():
     finally:
         events.cancel_release.set()
         await helper.close()
-        helper.pbar.close()
 
 
 @pytest.mark.asyncio
@@ -317,7 +312,6 @@ async def test_cancelled_close_waiter_still_cleans_local_requests():
     finally:
         events.cancel_release.set()
         await helper.close()
-        helper.pbar.close()
 
 
 @pytest.mark.asyncio
@@ -345,7 +339,6 @@ async def test_close_drains_queued_requests_and_guards_registration():
         assert all(future.cancelled() for future in futures.values())
     finally:
         await helper.close()
-        helper.pbar.close()
 
 
 @pytest.mark.asyncio
@@ -482,4 +475,4 @@ async def test_provider_init_failure_does_not_register_helper():
 
     assert helper.task is None
     assert helper.batch_tasks == set()
-    assert not hasattr(helper, "pbar")
+    assert helper._progress_renderer is None

@@ -29,7 +29,7 @@ class BatchRequestCounts:
     completed: int = 0
     failed: int = 0
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         for field_name in ("total", "completed", "failed"):
             value = getattr(self, field_name)
             if value < 0:
@@ -47,7 +47,7 @@ class BatchSnapshot:
     terminal: bool = False
     request_counts: Optional[BatchRequestCounts] = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.id:
             raise ValueError("id must not be empty")
         if not self.name:
@@ -65,7 +65,7 @@ class BatchProgressState:
         default_factory=lambda: MappingProxyType({})
     )
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         object.__setattr__(self, "active", tuple(self.active))
         object.__setattr__(
             self,
@@ -84,6 +84,14 @@ class BatchProgressState:
         """Number of finished batches."""
 
         return sum(self.finished_counts.values())
+
+
+class BatchProgressRenderer(Protocol):
+    """Render immutable snapshots of provider-neutral batch progress."""
+
+    def refresh(self, state: BatchProgressState) -> None: ...
+
+    def close(self) -> None: ...
 
 
 class _TqdmRow(Protocol):
@@ -108,14 +116,14 @@ class TqdmBatchProgressRenderer:
         *,
         disable: bool = False,
         tqdm_factory: TqdmFactory | None = None,
-    ):
+    ) -> None:
         self.max_items = resolve_batch_progress_max_items(max_items)
         self.disable = disable or self.max_items == 0
         self._tqdm_factory = tqdm.tqdm if tqdm_factory is None else tqdm_factory
         self._rows: list[_TqdmRow] = []
         self._closed = False
 
-    def refresh(self, state: BatchProgressState):
+    def refresh(self, state: BatchProgressState) -> None:
         """Update the live rows to reflect a batch progress snapshot."""
 
         if self.disable or self._closed:
@@ -144,7 +152,7 @@ class TqdmBatchProgressRenderer:
         for row in self._rows:
             row.refresh()
 
-    def close(self):
+    def close(self) -> None:
         """Close all live rows from bottom to top."""
 
         if self._closed:
@@ -159,7 +167,7 @@ class TqdmBatchProgressRenderer:
 class BatchTracker:
     """Track the latest active and terminal snapshots for remote batches."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._active: dict[str, BatchSnapshot] = {}
         self._finished: dict[str, BatchSnapshot] = {}
         self._finished_counts: Counter[str] = Counter()
@@ -176,7 +184,7 @@ class BatchTracker:
 
         return len(self._finished)
 
-    def update(self, batch: BatchSnapshot):
+    def update(self, batch: BatchSnapshot) -> None:
         """
         Store the latest snapshot for a batch.
 
@@ -193,7 +201,7 @@ class BatchTracker:
 
         self._active[batch.id] = batch
 
-    def finish(self, batch: BatchSnapshot):
+    def finish(self, batch: BatchSnapshot) -> None:
         """Move a terminal batch out of the active set and count its status."""
 
         if not batch.terminal:
@@ -332,6 +340,7 @@ __all__ = [
     "BATCH_PROGRESS_MAX_ITEMS_ENV_VAR",
     "DEFAULT_BATCH_PROGRESS_MAX_ITEMS",
     "BatchProgressState",
+    "BatchProgressRenderer",
     "BatchRequestCounts",
     "BatchSnapshot",
     "BatchTracker",

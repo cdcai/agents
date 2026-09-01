@@ -6,10 +6,12 @@ from .agent import (
 )
 from .callbacks import AgentCallback
 from .batch_progress import (
+    BatchProgressRenderer,
     BatchProgressState,
     BatchRequestCounts,
     BatchSnapshot,
     BatchTracker,
+    TqdmBatchProgressRenderer,
     format_batch_progress,
     resolve_batch_progress_max_items,
 )
@@ -33,10 +35,12 @@ __all__ = [
     "PredictionAgent",
     "PredictionAgentWithJustification",
     "AgentCallback",
+    "BatchProgressRenderer",
     "BatchProgressState",
     "BatchRequestCounts",
     "BatchSnapshot",
     "BatchTracker",
+    "TqdmBatchProgressRenderer",
     "format_batch_progress",
     "resolve_batch_progress_max_items",
     "ProcessorIterable",
