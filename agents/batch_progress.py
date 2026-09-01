@@ -9,11 +9,13 @@ tracks those snapshots and renders their current state.
 import os
 import warnings
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Mapping, Optional, Tuple
+from typing import Mapping, Optional, Protocol, Tuple
 
+import tqdm.asyncio as tqdm
 
 DEFAULT_BATCH_PROGRESS_MAX_ITEMS = 10
 BATCH_PROGRESS_MAX_ITEMS_ENV_VAR = "AGENTS_BATCH_PROGRESS_MAX_ITEMS"
@@ -80,6 +82,76 @@ class BatchProgressState:
         """Number of finished batches."""
 
         return sum(self.finished_counts.values())
+
+
+class _TqdmRow(Protocol):
+    """The subset of the tqdm API used by the progress renderer."""
+
+    def set_description_str(self, desc: str, refresh: bool = True) -> None: ...
+
+    def refresh(self) -> None: ...
+
+    def close(self) -> None: ...
+
+
+TqdmFactory = Callable[..., _TqdmRow]
+
+
+class TqdmBatchProgressRenderer:
+    """Render batch progress as reusable, text-only tqdm rows."""
+
+    def __init__(
+        self,
+        max_items: int | None = None,
+        *,
+        disable: bool = False,
+        tqdm_factory: TqdmFactory | None = None,
+    ):
+        self.max_items = resolve_batch_progress_max_items(max_items)
+        self.disable = disable or self.max_items == 0
+        self._tqdm_factory = tqdm.tqdm if tqdm_factory is None else tqdm_factory
+        self._rows: list[_TqdmRow] = []
+        self._closed = False
+
+    def refresh(self, state: BatchProgressState):
+        """Update the live rows to reflect a batch progress snapshot."""
+
+        if self.disable or self._closed:
+            return
+
+        rendered = format_batch_progress(state, max_items=self.max_items)
+        lines = rendered.splitlines()
+
+        while len(self._rows) > len(lines):
+            self._rows.pop().close()
+
+        existing_row_count = len(self._rows)
+        for index, line in enumerate(lines):
+            if index < existing_row_count:
+                self._rows[index].set_description_str(line, refresh=False)
+                continue
+
+            self._rows.append(
+                self._tqdm_factory(
+                    desc=line,
+                    bar_format="{desc}",
+                    leave=False,
+                )
+            )
+
+        for row in self._rows:
+            row.refresh()
+
+    def close(self):
+        """Close all live rows from bottom to top."""
+
+        if self._closed:
+            return
+
+        self._closed = True
+        rows, self._rows = self._rows, []
+        for row in reversed(rows):
+            row.close()
 
 
 class BatchTracker:
@@ -261,6 +333,7 @@ __all__ = [
     "BatchRequestCounts",
     "BatchSnapshot",
     "BatchTracker",
+    "TqdmBatchProgressRenderer",
     "format_batch_progress",
     "resolve_batch_progress_max_items",
 ]
