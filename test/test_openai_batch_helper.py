@@ -4,15 +4,18 @@ Test OpenAI Batch API helper lifecycle and result dispatch.
 
 import asyncio
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from openai.types import Batch
+from openai.types import Batch, FileObject
 
 from agents.providers.openai import (
     AzureOpenAIBatchProvider,
     OpenAIBatchAPIHelper,
 )
+
+TestBatchStatus = Literal["completed", "in_progress", "cancelling"]
 
 
 def make_request(custom_id: str) -> dict:
@@ -24,7 +27,7 @@ def make_request(custom_id: str) -> dict:
     }
 
 
-def make_batch() -> Batch:
+def make_batch(status: TestBatchStatus = "completed") -> Batch:
     return Batch(
         id="batch_123",
         completion_window="24h",
@@ -32,8 +35,20 @@ def make_batch() -> Batch:
         endpoint="/v1/chat/completions",
         input_file_id="file_123",
         object="batch",
-        output_file_id="file_456",
-        status="completed",
+        output_file_id="file_456" if status == "completed" else None,
+        status=status,
+    )
+
+
+def make_batch_file() -> FileObject:
+    return FileObject(
+        id="file_123",
+        bytes=1024,
+        created_at=0,
+        filename="batch.jsonl",
+        object="file",
+        purpose="batch",
+        status="uploaded",
     )
 
 
@@ -82,6 +97,43 @@ def make_dispatch_helper(results):
     helper.lock = asyncio.Semaphore(0)
     helper.pbar = Mock()
     return helper, provider
+
+
+def make_remote_cancel_provider():
+    retrieve_started = asyncio.Event()
+    cancel_started = asyncio.Event()
+    cancel_release = asyncio.Event()
+    cancel_completed = asyncio.Event()
+
+    async def retrieve(batch_id: str):
+        retrieve_started.set()
+        await asyncio.Future()
+
+    async def cancel(batch_id: str):
+        cancel_started.set()
+        await cancel_release.wait()
+        cancel_completed.set()
+        return make_batch("cancelling")
+
+    batches = SimpleNamespace(
+        create=AsyncMock(return_value=make_batch("in_progress")),
+        retrieve=AsyncMock(side_effect=retrieve),
+        cancel=AsyncMock(side_effect=cancel),
+    )
+    provider = object.__new__(AzureOpenAIBatchProvider)
+    provider.quiet = True
+    provider.batch_q = asyncio.Queue()
+    provider.batch_out = {}
+    provider.llm = SimpleNamespace(batches=batches)
+    provider.send_batch = AsyncMock(return_value=make_batch_file())
+    provider.get_batch_results = AsyncMock()
+    events = SimpleNamespace(
+        retrieve_started=retrieve_started,
+        cancel_started=cancel_started,
+        cancel_release=cancel_release,
+        cancel_completed=cancel_completed,
+    )
+    return provider, batches, events
 
 
 class NotifyingQueue(asyncio.Queue):
@@ -202,6 +254,73 @@ async def test_close_awaits_in_flight_handlers_and_is_repeatable():
 
 
 @pytest.mark.asyncio
+async def test_concurrent_close_does_not_interrupt_remote_cancellation():
+    provider, batches, events = make_remote_cancel_provider()
+    future = asyncio.get_running_loop().create_future()
+    provider.batch_out["task-1"] = future
+    helper = OpenAIBatchAPIHelper(batch_size=1)
+    helper.register_provider(provider)
+
+    try:
+        provider.batch_q.put_nowait(make_request("task-1"))
+        await asyncio.wait_for(events.retrieve_started.wait(), timeout=1)
+        first_close = asyncio.create_task(helper.close())
+        await asyncio.wait_for(events.cancel_started.wait(), timeout=1)
+
+        second_close = asyncio.create_task(helper.close())
+        await asyncio.sleep(0)
+
+        assert not first_close.done()
+        assert not second_close.done()
+        events.cancel_release.set()
+        await asyncio.wait_for(asyncio.gather(first_close, second_close), timeout=1)
+        assert events.cancel_completed.is_set()
+        batches.cancel.assert_awaited_once_with("batch_123")
+        assert future.cancelled()
+    finally:
+        events.cancel_release.set()
+        await helper.close()
+        helper.pbar.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_close_waiter_still_cleans_local_requests():
+    provider, batches, events = make_remote_cancel_provider()
+    in_flight = asyncio.get_running_loop().create_future()
+    queued = asyncio.get_running_loop().create_future()
+    provider.batch_out.update({"task-1": in_flight, "task-2": queued})
+    helper = OpenAIBatchAPIHelper(batch_size=1)
+    helper.register_provider(provider)
+
+    try:
+        provider.batch_q.put_nowait(make_request("task-1"))
+        await asyncio.wait_for(events.retrieve_started.wait(), timeout=1)
+        close_waiter = asyncio.create_task(helper.close())
+        await asyncio.wait_for(events.cancel_started.wait(), timeout=1)
+        provider.batch_q.put_nowait(make_request("task-2"))
+
+        close_waiter.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(close_waiter, timeout=1)
+        await asyncio.wait_for(provider.batch_q.join(), timeout=1)
+        assert provider.batch_q.empty()
+        assert provider.batch_out == {}
+        assert in_flight.cancelled()
+        assert queued.cancelled()
+        assert helper._close_task is not None and not helper._close_task.done()
+
+        events.cancel_release.set()
+        await asyncio.wait_for(helper.close(), timeout=1)
+        assert events.cancel_completed.is_set()
+        batches.cancel.assert_awaited_once_with("batch_123")
+    finally:
+        events.cancel_release.set()
+        await helper.close()
+        helper.pbar.close()
+
+
+@pytest.mark.asyncio
 async def test_close_drains_queued_requests_and_guards_registration():
     provider = make_queue_provider()
     futures = {
@@ -296,6 +415,8 @@ async def test_result_dispatch_skips_abandoned_futures():
 @pytest.mark.asyncio
 async def test_malformed_result_does_not_fail_siblings():
     results = [
+        None,
+        ["not", "a", "result"],
         {"custom_id": "task-malformed", "response": {"body": {}}},
         make_result("task-valid", content="Valid result"),
     ]
