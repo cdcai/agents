@@ -164,10 +164,39 @@ async def test_local_task_cancellation_cancels_remote_batch_without_masking_erro
     )
     provider = make_provider(batches)
     task = asyncio.create_task(provider.create_batch_task(make_batch_file()))
-    await retrieve_started.wait()
+    await asyncio.wait_for(retrieve_started.wait(), timeout=1)
 
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await asyncio.wait_for(task, timeout=1)
+    batches.cancel.assert_awaited_once_with("batch_123")
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_remote_cleanup_takes_precedence():
+    cleanup_started = asyncio.Event()
+
+    async def cancel(batch_id: str):
+        cleanup_started.set()
+        await asyncio.Future()
+
+    batches = SimpleNamespace(
+        create=AsyncMock(return_value=make_batch("in_progress")),
+        retrieve=AsyncMock(),
+        cancel=AsyncMock(side_effect=cancel),
+    )
+    provider = make_provider(batches)
+    task = asyncio.create_task(
+        provider.create_batch_task(
+            make_batch_file(),
+            status_callback=Mock(side_effect=RuntimeError("callback failed")),
+        )
+    )
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
     batches.cancel.assert_awaited_once_with("batch_123")
