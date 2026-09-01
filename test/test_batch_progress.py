@@ -52,6 +52,14 @@ def test_batch_snapshot_and_request_counts_are_immutable():
         counts.completed = 7
 
 
+def test_progress_state_has_immutable_default_finished_counts():
+    state = BatchProgressState()
+
+    assert dict(state.finished_counts) == {}
+    with pytest.raises(TypeError):
+        state.finished_counts["completed"] = 1
+
+
 @pytest.mark.parametrize("field_name", ["total", "completed", "failed"])
 def test_request_counts_reject_negative_values(field_name: str):
     values = {"total": 10, "completed": 5, "failed": 1}

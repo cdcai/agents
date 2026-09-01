@@ -10,7 +10,7 @@ import os
 import warnings
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Mapping, Optional, Protocol, Tuple
@@ -61,7 +61,9 @@ class BatchProgressState:
     """An immutable snapshot of all progress currently known to a tracker."""
 
     active: Tuple[BatchSnapshot, ...] = ()
-    finished_counts: Mapping[str, int] = MappingProxyType({})
+    finished_counts: Mapping[str, int] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def __post_init__(self):
         object.__setattr__(self, "active", tuple(self.active))
