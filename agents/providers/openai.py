@@ -45,7 +45,7 @@ from openai.types.chat import (
     ChatCompletionMessageParam,
     ChatCompletionMessageToolCall,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ..abstract import A, _BatchAPIHelper, _Provider, _ToolCall
 from ..observability import LLMUsage, Observable
@@ -113,12 +113,18 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
     def __init__(self, batch_size: int, n_workers: int = 1):
         self.batch_size = batch_size
         self.n_workers = n_workers
-        self.batch_tasks = []
+        self.batch_tasks = set()
+        self.task = None
+        self._closed = False
+        self._close_task = None
 
     def register_provider(self, provider: "AzureOpenAIBatchProvider"):
         """
         Store provider as an attribute and start up batching task
         """
+        if self.task is not None or self._closed:
+            raise RuntimeError("OpenAIBatchAPIHelper is already registered.")
+
         self.provider = provider
         self.pbar = tqdm.tqdm(
             desc="Active Batch Requests",
@@ -142,7 +148,50 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         except Exception as e:
             logger.warning(f"Batch task resulted in an error: {str(e)}")
         finally:
-            self.batch_tasks.remove(task)
+            self.batch_tasks.discard(task)
+
+    def _cleanup_local_requests(self) -> None:
+        """
+        Drain queued requests and cancel futures that cannot receive a result.
+        """
+        if not hasattr(self, "provider"):
+            return
+
+        while True:
+            try:
+                self.provider.batch_q.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self.provider.batch_q.task_done()
+
+        for future in list(self.provider.batch_out.values()):
+            if not future.done():
+                future.cancel()
+        self.provider.batch_out.clear()
+
+    async def _close(self) -> None:
+        try:
+            await super().close()
+        finally:
+            self._cleanup_local_requests()
+
+    async def close(self):
+        """
+        Close the helper and cancel any requests that have not received a result.
+        """
+        self._closed = True
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(
+                self._close(), name="OpenAIBatchHelperClose"
+            )
+
+        try:
+            await asyncio.shield(self._close_task)
+        except asyncio.CancelledError:
+            # The shared close operation continues, but local callers must not hang.
+            self._cleanup_local_requests()
+            raise
 
     async def _batcher(self):
         """
@@ -159,7 +208,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                 # Define our batch and start the clock
                 batch = []
                 # Wait until first query comes in
-                req = await self.provider.batch_q.get()
+                req = await self._get_batch_request()
                 batch.append(req)
 
                 # Await new messages to load into the batch
@@ -167,19 +216,16 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                 # - Until we've waited for the time indicated (default 2s)
                 while len(batch) < self.batch_size:
                     try:
-                        req = await asyncio.wait_for(
-                            self.provider.batch_q.get(), timeout=self.timeout
-                        )
+                        req = await self._get_batch_request(timeout=self.timeout)
                     except asyncio.TimeoutError:
                         break
                     batch.append(req)
-                    self.provider.batch_q.task_done()
 
                 # Wait for semaphore to send off batch task
                 await self.lock.acquire()
 
                 batch_task = asyncio.create_task(self._batch_handler(batch))
-                self.batch_tasks.append(batch_task)
+                self.batch_tasks.add(batch_task)
 
                 # Batch task should remove itself from the list once it's done
                 batch_task.add_done_callback(self._batch_handler_callback)
@@ -189,6 +235,27 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                 logger.info("OpenAIBatchHelper closing.")
 
                 break
+
+    async def _get_batch_request(
+        self, timeout: Optional[float] = None
+    ) -> BatchRequestInput:
+        """Retrieve and account for one queued request, including cancellation."""
+        request_task = asyncio.create_task(self.provider.batch_q.get())
+        try:
+            if timeout is None:
+                request = await request_task
+            else:
+                request = await asyncio.wait_for(request_task, timeout=timeout)
+        except BaseException:
+            if not request_task.done():
+                request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+            if not request_task.cancelled() and request_task.exception() is None:
+                self.provider.batch_q.task_done()
+            raise
+
+        self.provider.batch_q.task_done()
+        return request
 
     async def _batch_handler(self, batch: List[BatchRequestInput]) -> None:
         """
@@ -218,9 +285,42 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
             results = await self.provider.get_batch_results(batch_task)
 
             # Write out results to dict for agents to pick up
+            expected_ids = {batch_item["custom_id"] for batch_item in batch}
+            returned_ids = set()
             for result in results:
-                self.provider.batch_out[result["custom_id"]].set_result(
-                    ChatCompletion.model_validate(result["response"]["body"])
+                if not isinstance(result, dict):
+                    logger.warning(
+                        f"Batch [{batch_task.id}] returned an unexpected result."
+                    )
+                    continue
+                custom_id = result.get("custom_id")
+                if not isinstance(custom_id, str) or custom_id not in expected_ids:
+                    logger.warning(
+                        f"Batch [{batch_task.id}] returned an unexpected result."
+                    )
+                    continue
+
+                returned_ids.add(custom_id)
+                future = self.provider.batch_out.get(custom_id)
+                if future is None or future.done():
+                    continue
+
+                try:
+                    response = ChatCompletion.model_validate(result["response"]["body"])
+                except (KeyError, TypeError, ValidationError) as e:
+                    future.set_exception(e)
+                else:
+                    future.set_result(response)
+
+            for custom_id in expected_ids - returned_ids:
+                future = self.provider.batch_out.get(custom_id)
+                if future is None or future.done():
+                    continue
+                future.set_exception(
+                    RuntimeError(
+                        f"Batch [{batch_task.id}] returned no result for "
+                        f"request [{custom_id}]."
+                    )
                 )
 
             # Log that we're done
@@ -229,13 +329,13 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         except Exception as e:
             # propagate the exception to the futures
             for batch_item in batch:
-                fut = self.provider.batch_out[batch_item["custom_id"]]
-                if not fut.done():
+                fut = self.provider.batch_out.get(batch_item["custom_id"])
+                if fut is not None and not fut.done():
                     # If the future is not done, set it to an exception
                     fut.set_exception(e)
 
             # Signal to batcher as well
-            raise e
+            raise
 
         finally:
             self.lock.release()
@@ -446,10 +546,10 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         else:
             self.batch_handler = batch_handler
 
-        # Register the batch handler and start the batch processing task
-        self.batch_handler.register_provider(self)
-
         super().__init__(model_name, interactive, **kwargs)
+
+        # Register the batch handler only after provider initialization succeeds.
+        self.batch_handler.register_provider(self)
 
     async def __aexit__(self, exc_type, exc_value, traceback):
         """
@@ -465,6 +565,8 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         self, messages: List[ChatCompletionMessageParam], model: str, **kwargs
     ) -> ChatCompletion:
         async with self.batch_idx_lock:
+            if self.batch_handler._closed:
+                raise RuntimeError("OpenAIBatchAPIHelper is closed.")
             task_id = f"task-{self.batch_idx}"
             self.batch_idx += 1
 
@@ -476,22 +578,18 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         }
 
         # Create a future to hold the result
-        self.batch_out[task_id] = asyncio.get_running_loop().create_future()
+        future = asyncio.get_running_loop().create_future()
+        self.batch_out[task_id] = future
 
-        # Put the task into the queue for processing
-        await self.batch_q.put(task)
+        try:
+            # Put the task into the queue for processing
+            await self.batch_q.put(task)
 
-        # Await the result
-        out = await self.batch_out[task_id]
-
-        # remove the future from the output dict
-        self.batch_out.pop(task_id, None)
-
-        # Propagate errors if we encountered any
-        if isinstance(out, Exception):
-            raise out
-
-        return out
+            # Await the result
+            return await future
+        finally:
+            # Remove the future even if its caller is cancelled.
+            self.batch_out.pop(task_id, None)
 
     @staticmethod
     def _create_batch_file(

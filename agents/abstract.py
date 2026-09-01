@@ -338,21 +338,23 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
 
 class _BatchAPIHelper(Generic[P], metaclass=abc.ABCMeta):
     timeout: float = 2.0
-    task: Task
-    batch_tasks: List[Task]
+    task: Optional[Task]
+    batch_tasks: set[Task]
     provider: P
 
     async def close(self):
         """
         Close the batch API helper, canceling any running tasks
         """
+        tasks = set(self.batch_tasks)
         if self.task is not None:
-            self.task.cancel()
-        for t in self.batch_tasks:
-            t.cancel()
+            tasks.add(self.task)
 
-        all_tasks = [self.task] + self.batch_tasks
-        await asyncio.gather(*all_tasks, return_exceptions=True)
+        for task in tasks:
+            task.cancel()
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     @abc.abstractmethod
     def register_provider(self, provider: P):
