@@ -5,7 +5,9 @@ import os
 from dataclasses import dataclass
 from io import BytesIO, StringIO
 from typing import (
+    Callable,
     Dict,
+    FrozenSet,
     Generic,
     List,
     Literal,
@@ -52,6 +54,21 @@ DEFAULT_BATCH_SIZE = 1000
 ProviderMode = TypeVar("ProviderMode", Literal["chat"], Literal["batch"])
 
 logger = logging.getLogger(__name__)
+
+OPENAI_BATCH_ACTIVE_STATUSES: FrozenSet[str] = frozenset(
+    {"validating", "in_progress", "finalizing", "cancelling"}
+)
+OPENAI_BATCH_TERMINAL_STATUSES: FrozenSet[str] = frozenset(
+    {"completed", "failed", "expired", "cancelled"}
+)
+OPENAI_BATCH_SUCCESS_STATUSES: FrozenSet[str] = frozenset({"completed"})
+
+BatchStatusCallback = Callable[[Batch], None]
+
+
+def _noop_batch_status_callback(_batch: Batch) -> None:
+    pass
+
 
 # HACK: OpenAI does not (yet) implement batch request input type
 # See: https://github.com/openai/openai-python/issues/1937
@@ -523,17 +540,26 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         return file
 
     async def create_batch_task(
-        self, batch_file: FileObject, timeout: int = 30, **kwargs
+        self,
+        batch_file: FileObject,
+        timeout: int = 30,
+        status_callback: Optional[BatchStatusCallback] = None,
+        **kwargs,
     ) -> Batch:
         """
         Create a batch from an existing batch file object.
 
         :param FileObject batch_file: An OpenAI File object representing the batch file
         :param int timeout: polling timeout waiting for response
-        :param kwargs: Additional keyword arguments for the batch creation (see OpenAI API documentation)
+        :param status_callback: Optional synchronous callback invoked with the created batch
+            and every subsequently retrieved batch state
+        :param kwargs: Additional keyword arguments for the batch creation
 
-        :return: An OpenAI File object representing the created batch
+        :return: The terminal OpenAI Batch object
         """
+        if status_callback is None:
+            status_callback = _noop_batch_status_callback
+
         try:
             batch = await self.llm.batches.create(
                 input_file_id=batch_file.id,
@@ -542,22 +568,30 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
                 **kwargs,
             )
             logger.info(f"Executing batch task [{batch_file.id}] -> [{batch.id}]")
-        except:
+        except Exception:
             logger.error(f"Attempt to process batch {batch_file.id} failed!")
             raise
 
         try:
-            while batch.status not in ["completed", "failed"]:
+            status_callback(batch)
+            while batch.status not in OPENAI_BATCH_TERMINAL_STATUSES:
                 logger.info(f"Batch [{batch.id}] Status: {batch.status}")
                 batch = await self.llm.batches.retrieve(batch.id)
-                await asyncio.sleep(timeout)
+                status_callback(batch)
+                if batch.status not in OPENAI_BATCH_TERMINAL_STATUSES:
+                    await asyncio.sleep(timeout)
 
-        except Exception as e:
-            # Cancel batch before we terminate
-            if batch.status not in {"completed", "failed"}:
-                await self.llm.batches.cancel(batch.id)
-            logger.error(f"Error retrieving batch! {str(e)}")
-            raise e
+        except (Exception, asyncio.CancelledError) as e:
+            # Cancel the remote batch before terminating while preserving the error.
+            if batch.status not in OPENAI_BATCH_TERMINAL_STATUSES:
+                try:
+                    await self.llm.batches.cancel(batch.id)
+                except (Exception, asyncio.CancelledError) as cancel_error:
+                    logger.warning(
+                        f"Error cancelling batch [{batch.id}]: {str(cancel_error)}"
+                    )
+            logger.error(f"Error processing batch [{batch.id}]! {str(e)}")
+            raise
 
         return batch
 
@@ -569,7 +603,10 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
 
         :return: A list of results from the batch
         """
-        if batch.status != "completed" or batch.output_file_id is None:
+        if (
+            batch.status not in OPENAI_BATCH_SUCCESS_STATUSES
+            or batch.output_file_id is None
+        ):
             raise ValueError("Batch status was not 'completed'! Got: " + batch.status)
 
         result_stream = await self.llm.files.content(batch.output_file_id)
