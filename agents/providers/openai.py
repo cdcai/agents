@@ -586,7 +586,7 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
             if batch.status not in OPENAI_BATCH_TERMINAL_STATUSES:
                 try:
                     await self.llm.batches.cancel(batch.id)
-                except (Exception, asyncio.CancelledError) as cancel_error:
+                except Exception as cancel_error:
                     logger.warning(
                         f"Error cancelling batch [{batch.id}]: {str(cancel_error)}"
                     )
