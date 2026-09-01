@@ -38,6 +38,35 @@ pip install git+https://github.com/cdcai/multiagent.git
 | Taking output from one agent as input to another in a callback | [agent_with_callback.py](examples/agent_with_callback.py) |
 | Getting structured output from agent / Text Prediction | [structured_prediction.py](examples/structured_prediction.py) |
 | Batch processing large inputs over the same agent in parallel | [batch_processing.py](examples/batch_processing.py) |
+| Processing requests with the OpenAI Batch API | [batch_api.py](examples/batch_api.py) |
+
+### Batch API progress
+
+`AzureOpenAIBatchProvider` displays active remote batches by metadata name (falling
+back to the batch ID), UTC start time, status, and request counts when they are
+available. The display shows up to 10 batches, oldest first, then aggregates
+additional batches by status and keeps terminal status totals on the last line.
+Local monitoring failures and cancellations are reported separately as
+`tracking_failed` and `tracking_cancelled`, rather than as remote API statuses.
+
+Set the display limit explicitly when creating the provider:
+
+```python
+provider = AzureOpenAIBatchProvider(
+    "gpt-4o-batch",
+    batch_size=1000,
+    n_workers=20,
+    progress_max_items=10,
+)
+```
+
+If `progress_max_items` is not supplied, `AGENTS_BATCH_PROGRESS_MAX_ITEMS` sets the
+limit. Set either value to `0` to disable the remote batch display. `quiet=True`
+also suppresses it.
+
+The latest immutable state is available as `provider.batch_progress`. Alternate
+displays can implement `BatchProgressRenderer` and be supplied to an
+`OpenAIBatchAPIHelper`; configure `progress_max_items` on that custom helper.
 
 ## Public Domain Standard Notice
 This repository constitutes a work of the United States Government and is not
