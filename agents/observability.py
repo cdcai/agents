@@ -6,18 +6,14 @@ import logging
 from collections import namedtuple
 from functools import wraps, reduce
 from typing import (
-    TYPE_CHECKING,
     Any,
     Awaitable,
     Callable,
-    Generic,
     List,
     Optional,
-    TypeVar,
 )
 
-if TYPE_CHECKING:
-    from openai.types import CompletionUsage
+from openai.types import CompletionUsage
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +37,7 @@ def sum_llm_usage(x: LLMUsage, y: LLMUsage) -> LLMUsage:
     return LLMUsage(*[i + j for i, j in zip(x, y)])
 
 
-# Types of Completion Usage storing classes that might be seen
-CompletionTypes = TypeVar("CompletionTypes", "CompletionUsage", LLMUsage)
-
-
-class Observable(Generic[CompletionTypes]):
+class Observable[CompletionT: CompletionUsage | LLMUsage]:
     """
     Observability methods and attributes needed for the provider and agent to track
     token and round-trip usage
@@ -59,7 +51,7 @@ class Observable(Generic[CompletionTypes]):
         self.round_trips = 0
 
     @staticmethod
-    def usage_adapter(usage: Optional[CompletionTypes]) -> LLMUsage:
+    def usage_adapter(usage: Optional[CompletionT]) -> LLMUsage:
         """
         A method which should be extended to adapt usage for provider-specific token usage types
         """

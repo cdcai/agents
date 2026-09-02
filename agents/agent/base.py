@@ -1,12 +1,13 @@
 import asyncio
 import logging
-from copy import copy
-from typing import Any, List, Optional
+from collections.abc import Callable, Sequence
+from typing import Any, Optional
 
 import openai
+from openai.types.chat.chat_completion import Choice
 from pydantic import BaseModel
 
-from ..abstract import Message, _Agent
+from ..abstract import Message, _Agent, _Provider, _StoppingCondition
 from ..providers import AzureOpenAIProvider
 from ..stopping_conditions import StopOnDataModel
 
@@ -44,14 +45,14 @@ class Agent(_Agent):
 
     def __init__(
         self,
-        stopping_condition,
-        model_name=None,
-        provider=None,
-        tools=None,
-        callbacks=None,
-        oai_kwargs=None,
-        **fmt_kwargs,
-    ):
+        stopping_condition: _StoppingCondition,
+        model_name: Optional[str] = None,
+        provider: Optional[_Provider[Any]] = None,
+        tools: Optional[Sequence[Any]] = None,
+        callbacks: Optional[Sequence[Callable[..., Any]]] = None,
+        oai_kwargs: Optional[dict[str, Any]] = None,
+        **fmt_kwargs: Any,
+    ) -> None:
         """
         Base Agent class
 
@@ -65,11 +66,11 @@ class Agent(_Agent):
         """
         super().__init__(
             stopping_condition,
-            model_name=None,
-            provider=None,
-            tools=None,
-            callbacks=None,
-            oai_kwargs=None,
+            model_name=model_name,
+            provider=provider,
+            tools=tools,
+            callbacks=callbacks,
+            oai_kwargs=oai_kwargs,
             **fmt_kwargs,
         )
 
@@ -78,6 +79,8 @@ class Agent(_Agent):
         # We default to Azure OpenAI here, but
         # we could also use something else as long as it follows the OpenAI API
         if provider is None:
+            if model_name is None:
+                raise ValueError("model_name is required when provider is not supplied")
             self.provider = AzureOpenAIProvider(
                 model_name=model_name, interactive=False
             )
@@ -118,7 +121,7 @@ class Agent(_Agent):
         for callback in self.CALLBACKS:
             await callback(self, answer=self.answer, scratchpad=self.scratchpad)
 
-    async def __call__(self, *args, **kwargs) -> str:
+    async def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """
         Run the underlying agent logic and returns the final answer.
 
@@ -134,7 +137,7 @@ class Agent(_Agent):
 
         return self.answer
 
-    def _check_stop_condition(self, response):
+    def _check_stop_condition(self, response: Choice) -> None:
         # Check if we've reached a stopping place
         if (answer := self.stopping_condition(self, response)) is not None:
             self.answer = answer
@@ -174,7 +177,8 @@ class Agent(_Agent):
                 await self._handle_tool_calls(response)
 
         # Conditionally end run and assign answer
-        self._check_stop_condition(response)
+        if response is not None:
+            self._check_stop_condition(response)
 
         if self.terminated:
             self.scratchpad += "===== Answer ============\n"
@@ -210,12 +214,12 @@ class Agent(_Agent):
 
         return out
 
-    def get_next_messages(self) -> List[Message]:
+    def get_next_messages(self) -> list[Message]:
         """
         Retrieve next message payload for GPT prompting.
         This defaults to only the SYSTEM_PROMPT and the formatted BASE_PROMPT via format_prompt()
         """
-        out: List[Message] = [
+        out: list[Message] = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
             {"role": "system", "content": self.format_prompt()},
         ]
@@ -226,7 +230,7 @@ class Agent(_Agent):
 
         return out
 
-    async def _handle_tool_calls(self, response):
+    async def _handle_tool_calls(self, response: Choice) -> None:
         """
         Handle all tool calls in response object
 
@@ -327,13 +331,13 @@ class StructuredOutputAgent(Agent):
         self,
         response_model: type[BaseModel],
         model_name: Optional[str] = None,
-        stopping_condition=None,
-        provider=None,
-        tools=None,
-        callbacks=None,
-        oai_kwargs=None,
-        **fmt_kwargs,
-    ):
+        stopping_condition: Optional[_StoppingCondition] = None,
+        provider: Optional[_Provider[Any]] = None,
+        tools: Optional[Sequence[Any]] = None,
+        callbacks: Optional[Sequence[Callable[..., Any]]] = None,
+        oai_kwargs: Optional[dict[str, Any]] = None,
+        **fmt_kwargs: Any,
+    ) -> None:
         """
         Language Agent with structured output
 
@@ -366,12 +370,8 @@ class StructuredOutputAgent(Agent):
         oai_tool = openai.pydantic_function_tool(response_model)
 
         # Ensure we don't modify external tools
-        tools_internal = copy(tools)
-
-        if tools_internal is not None:
-            tools_internal.append(oai_tool)
-        else:
-            tools_internal = [oai_tool]
+        tools_internal = list(tools) if tools is not None else []
+        tools_internal.append(oai_tool)
 
         # Assign a class method
         fun_name = oai_tool["function"]["name"]

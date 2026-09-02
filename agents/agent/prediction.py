@@ -4,11 +4,12 @@ Sean Browning (oet5)
 """
 
 import logging
-from typing import Callable, List, Literal, Optional, Any
+from collections.abc import Callable
+from typing import Any, Literal, Optional
 
 import pydantic
 
-from ..abstract import _StoppingCondition, _Provider
+from ..abstract import _Provider, _StoppingCondition
 from .base import StructuredOutputAgent
 
 logger = logging.getLogger(__name__)
@@ -31,8 +32,8 @@ class PredictionAgent(StructuredOutputAgent):
         stopping_condition: Optional[_StoppingCondition] = None,
         model_name: Optional[str] = None,
         provider: Optional[_Provider] = None,
-        tools: Optional[List[dict]] = None,
-        callbacks: Optional[List[Callable]] = None,
+        tools: Optional[list[dict]] = None,
+        callbacks: Optional[list[Callable]] = None,
         oai_kwargs: Optional[dict[str, Any]] = None,
         **fmt_kwargs,
     ):
@@ -73,7 +74,7 @@ class PredictionAgent(StructuredOutputAgent):
 
         class classify(pydantic.BaseModel):
             # NOTE: This is kind of hacky since we're using runtime type-hints
-            labels: List[Literal[tuple(self.labels)]] = pydantic.Field(  # type: ignore
+            labels: list[Literal[tuple(self.labels)]] = pydantic.Field(  # type: ignore
                 description="Classify the input data into one of the possible categories"
             )
 
@@ -109,10 +110,10 @@ class PredictionAgentWithJustification(PredictionAgent):
 
         class classify(pydantic.BaseModel):
             # NOTE: This is kind of hacky since we're using runtime type-hints
-            labels: List[Literal[tuple(self.labels)]] = pydantic.Field(  # type: ignore
+            labels: list[Literal[tuple(self.labels)]] = pydantic.Field(  # type: ignore
                 description="Classify the input data into one of the possible categories"
             )
-            justification: List[str] = pydantic.Field(
+            justification: list[str] = pydantic.Field(
                 description="SHORT description explaining your reasoning for the classfication"
             )
 
