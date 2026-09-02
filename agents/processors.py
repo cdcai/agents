@@ -13,7 +13,7 @@ from .agent import Agent
 
 logger = logging.getLogger(__name__)
 
-type Placeholder = str | tuple[str, ...]
+type Placeholder = str | tuple[str, ...] | dict[str, Any] | list[dict[str, Any]]
 
 
 class _Processor[AgentT: Agent, DataInputT](metaclass=ABCMeta):
