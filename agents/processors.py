@@ -400,7 +400,7 @@ class AllCallProcessor(_Processor):
                 errored = True
 
         except Exception as e:
-            logger.error(f"[_agent_handler]: Task {id} failed, {str(e)}")
+            logger.error(f"[_agent_handler]: Task {id} failed, {e!s}", exc_info=True)
             errored = True
 
         if errored:
