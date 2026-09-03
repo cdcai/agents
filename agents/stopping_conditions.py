@@ -2,7 +2,6 @@
 Stopping conditions for language agents
 """
 
-
 from pydantic import BaseModel
 
 from .abstract import _StoppingCondition
@@ -17,7 +16,6 @@ class StoppingCondition(_StoppingCondition):
 
     The main call should always return the final answer, if we've finished the run, or None otherwise
     """
-
 
 
 class StopOnStep(_StoppingCondition):

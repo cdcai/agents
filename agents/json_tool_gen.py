@@ -108,9 +108,7 @@ def arg_to_oai_type(arg: Any) -> ToolParameterProperties:
     elif arg in PYTHON_TO_OAI_SCHEMA:
         return {"type": PYTHON_TO_OAI_SCHEMA[arg]}  # type: ignore
     else:
-        raise KeyError(
-            f"Type {arg!s} is not an interpretable type for OpenAI."
-        )
+        raise KeyError(f"Type {arg!s} is not an interpretable type for OpenAI.")
 
 
 def generate_tool_json_payload(
