@@ -18,8 +18,10 @@ from collections.abc import Callable
 from typing import (
     Any,
     Literal,
+    Protocol,
     TypedDict,
     Union,
+    cast,
     get_args,
     get_origin,
     get_type_hints,
@@ -66,6 +68,10 @@ class ToolFunction(TypedDict):
 class ToolDefinition(TypedDict):
     type: Literal["function"]
     function: ToolFunction
+
+
+class _AgentToolPayloadCarrier(Protocol):
+    agent_tool_payload: ToolDefinition
 
 
 def arg_to_oai_type(arg: Any) -> ToolParameterProperties:
@@ -192,7 +198,7 @@ def agent_callable(description: str, variable_description: dict[str, str]):
         json_payload = generate_tool_json_payload(
             func, description, variable_description
         )
-        wrapper.agent_tool_payload = json_payload
+        cast(_AgentToolPayloadCarrier, wrapper).agent_tool_payload = json_payload
 
         return wrapper
 
@@ -220,7 +226,7 @@ def async_agent_callable(description: str, variable_description: dict[str, str])
         json_payload = generate_tool_json_payload(
             func, description, variable_description
         )
-        wrapper.agent_tool_payload = json_payload
+        cast(_AgentToolPayloadCarrier, wrapper).agent_tool_payload = json_payload
 
         return wrapper
 
