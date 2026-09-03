@@ -8,7 +8,7 @@ version = "0.4.1"
 description = "Yet another langchain-esque package to use language agents and compose agent-systems"
 readme = "README.md"
 requires-python = ">=3.12"
-license = "LICENSE"
+license-file = "LICENSE"
 authors = [
     { name = "Sean Browning", email = "sbrowning@cdc.gov" },
 ]
