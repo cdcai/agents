@@ -11,9 +11,9 @@ from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from pytest_mock import MockFixture
 
 import agents
-from agents.providers import AzureOpenAIProvider, AzureOpenAIBatchProvider
-from agents.observability import LLMUsage
 from agents import StopNoOp
+from agents.observability import LLMUsage
+from agents.providers import AzureOpenAIProvider
 
 # A mock OpenAI response
 mock_completion = ChatCompletion(
@@ -76,7 +76,7 @@ async def test_token_and_turn_tracking(mocker: MockFixture):
     await ag2.step()
 
     # Check that usage of first agent stayed the same and that provider now reflects both calls
-    expected_counts2 = LLMUsage(*map(lambda x: x * 2, expected_counts))
+    expected_counts2 = LLMUsage(*(x * 2 for x in expected_counts))
     assert (
         expected_counts == ag1.usage
     ), f"Observable agent should not have been modified! got: {ag1.usage}"

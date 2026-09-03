@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Callable, Sequence
-from typing import Any, Optional
+from typing import Any
 
 import openai
 from openai.types.chat.chat_completion import Choice
@@ -46,11 +46,11 @@ class Agent(_Agent):
     def __init__(
         self,
         stopping_condition: _StoppingCondition,
-        model_name: Optional[str] = None,
-        provider: Optional[_Provider[Any]] = None,
-        tools: Optional[Sequence[Any]] = None,
-        callbacks: Optional[Sequence[Callable[..., Any]]] = None,
-        oai_kwargs: Optional[dict[str, Any]] = None,
+        model_name: str | None = None,
+        provider: _Provider[Any] | None = None,
+        tools: Sequence[Any] | None = None,
+        callbacks: Sequence[Callable[..., Any]] | None = None,
+        oai_kwargs: dict[str, Any] | None = None,
         **fmt_kwargs: Any,
     ) -> None:
         """
@@ -240,7 +240,7 @@ class Agent(_Agent):
         """
         # Guarding
         if response.message.tool_calls is None:
-            return None
+            return
 
         self.scratchpad += "--- Evaluating Toolcalls -----------------\n"
 
@@ -312,7 +312,7 @@ class Agent(_Agent):
             if callable(getattr(self, obj)) and len(
                 getattr(getattr(self, obj), "agent_tool_payload", [])
             ):
-                payload.append(getattr(getattr(self, obj), "agent_tool_payload"))
+                payload.append(getattr(self, obj).agent_tool_payload)
 
         return payload
 
@@ -330,12 +330,12 @@ class StructuredOutputAgent(Agent):
     def __init__(
         self,
         response_model: type[BaseModel],
-        model_name: Optional[str] = None,
-        stopping_condition: Optional[_StoppingCondition] = None,
-        provider: Optional[_Provider[Any]] = None,
-        tools: Optional[Sequence[Any]] = None,
-        callbacks: Optional[Sequence[Callable[..., Any]]] = None,
-        oai_kwargs: Optional[dict[str, Any]] = None,
+        model_name: str | None = None,
+        stopping_condition: _StoppingCondition | None = None,
+        provider: _Provider[Any] | None = None,
+        tools: Sequence[Any] | None = None,
+        callbacks: Sequence[Callable[..., Any]] | None = None,
+        oai_kwargs: dict[str, Any] | None = None,
         **fmt_kwargs: Any,
     ) -> None:
         """

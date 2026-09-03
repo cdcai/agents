@@ -15,7 +15,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
-    Optional,
     Union,
 )
 
@@ -61,10 +60,10 @@ class _ToolCall[AgentT: _Agent](metaclass=abc.ABCMeta):
     kwargs: dict[str, Any] = field(default_factory=dict, init=False)
 
     "Any errors to be returned to the agent (failure to retrieve function or parse args, etc)"
-    errors: Optional[str] = field(init=False, default=None)
+    errors: str | None = field(init=False, default=None)
 
     "An asyncio task running the tool call"
-    task: Optional[Task] = field(init=False, default=None)
+    task: Task | None = field(init=False, default=None)
 
     @property
     @abc.abstractmethod
@@ -96,8 +95,8 @@ class _ToolCall[AgentT: _Agent](metaclass=abc.ABCMeta):
     @staticmethod
     @abc.abstractmethod
     def _construct_return_message(
-        id: str, response: Union[str, BaseModel]
-    ) -> dict[str, Union[str, BaseModel]]:
+        id: str, response: str | BaseModel
+    ) -> dict[str, str | BaseModel]:
         """
         A function that constructs the provider-appropriate return message for the tool call.
 
@@ -111,7 +110,7 @@ class _ToolCall[AgentT: _Agent](metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @property
-    def result(self) -> Optional[dict[str, Union[str, BaseModel]]]:
+    def result(self) -> dict[str, str | BaseModel] | None:
         """
         Return tool call result, if available
         - calls the result() method on the task
@@ -147,11 +146,11 @@ class _ToolCall[AgentT: _Agent](metaclass=abc.ABCMeta):
             self.kwargs.update(json.loads(self.arg_str))
         except json.JSONDecodeError as e:
             logger.warning(
-                f"Tool call {self.func_name} in response couldn't be decoded: {str(e)}"
+                f"Tool call {self.func_name} in response couldn't be decoded: {e!s}"
             )
             self.errors = "The arguments to your previous tool call couldn't be parsed correctly. Please ensure you properly escapse quotes and construct a valid JSON payload."
 
-    def __call__(self) -> Task[dict[str, Union[str, BaseModel]]]:
+    def __call__(self) -> Task[dict[str, str | BaseModel]]:
         """
         Return async task to gather later
         - Can only be fired once
@@ -161,7 +160,7 @@ class _ToolCall[AgentT: _Agent](metaclass=abc.ABCMeta):
             self.task = create_task(self.handler(), name=self.id)
         return self.task
 
-    async def handler(self) -> dict[str, Union[str, BaseModel]]:
+    async def handler(self) -> dict[str, str | BaseModel]:
         """
         A handler coroutine that wraps a tool call, either awaiting it if it's also a co-routine, or sending
         it to a thread to be handled separately if it's sequential.
@@ -225,7 +224,7 @@ class _Provider[AgentT: _Agent](Observable, metaclass=abc.ABCMeta):
         """
         Close the provider, if necessary.
         """
-        return None
+        return
 
 
 class _StoppingCondition(metaclass=abc.ABCMeta):
@@ -237,7 +236,7 @@ class _StoppingCondition(metaclass=abc.ABCMeta):
     """
 
     @abc.abstractmethod
-    def __call__(self, cls: "_Agent", response: "Choice") -> Optional[Any]:
+    def __call__(self, cls: "_Agent", response: "Choice") -> Any | None:
         raise NotImplementedError()
 
 
@@ -256,16 +255,16 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
     callback_output: list[Any]
     tool_res_payload: list[dict[str, Any]]
     provider: _Provider[Any]
-    placeholder: Optional[Any]
+    placeholder: Any | None
 
     def __init__(
         self,
         stopping_condition: _StoppingCondition,
-        model_name: Optional[str] = None,
-        provider: Optional[_Provider[Any]] = None,
-        tools: Optional[Sequence[Any]] = None,
-        callbacks: Optional[Sequence[Callable[..., Any]]] = None,
-        oai_kwargs: Optional[dict[str, Any]] = None,
+        model_name: str | None = None,
+        provider: _Provider[Any] | None = None,
+        tools: Sequence[Any] | None = None,
+        callbacks: Sequence[Callable[..., Any]] | None = None,
+        oai_kwargs: dict[str, Any] | None = None,
         **fmt_kwargs: Any,
     ) -> None:
         super().__init__()
@@ -318,7 +317,7 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
         return self.truncated
 
     @abc.abstractmethod
-    def dump(self, outfile: Union[str, os.PathLike]) -> None:
+    def dump(self, outfile: str | os.PathLike) -> None:
         raise NotImplementedError()
 
     @abc.abstractmethod

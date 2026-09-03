@@ -6,9 +6,7 @@ from dataclasses import dataclass
 from io import BytesIO, StringIO
 from typing import (
     Literal,
-    Optional,
     TypedDict,
-    Union,
 )
 
 import backoff
@@ -17,14 +15,14 @@ try:
     import openai
 except ImportError as e:
     raise ImportError(
-        f"OpenAI package must be installed to use an OpenAI provider!\n{str(e)}"
+        f"OpenAI package must be installed to use an OpenAI provider!\n{e!s}"
     )
 import tqdm.asyncio as tqdm
 
 try:
     from azure.identity.aio import ClientSecretCredential, get_bearer_token_provider
 except ImportError as e:
-    raise ImportError(f"azure.identity is required for OpenAI providers!\n{str(e)}")
+    raise ImportError(f"azure.identity is required for OpenAI providers!\n{e!s}")
 
 from openai.types import (
     Batch,
@@ -54,7 +52,7 @@ class BatchRequestInput(TypedDict):
     custom_id: str
     method: Literal["POST"]
     url: Literal["/v1/chat/completions", "/v1/embeddings", "/v1/completions"]
-    body: Union[EmbeddingCreateParams, CompletionCreateParams]
+    body: EmbeddingCreateParams | CompletionCreateParams
 
 
 @dataclass
@@ -79,8 +77,8 @@ class OpenAIToolCall(_ToolCall):
 
     @staticmethod
     def _construct_return_message(
-        id: str, response: Union[str, BaseModel]
-    ) -> dict[str, Union[str, BaseModel]]:
+        id: str, response: str | BaseModel
+    ) -> dict[str, str | BaseModel]:
         return {"tool_call_id": id, "role": "tool", "content": response}
 
 
@@ -117,8 +115,8 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
             task.result()
         except asyncio.CancelledError:
             logger.info("Batch task was cancelled.")
-        except Exception as e:
-            logger.warning(f"Batch task resulted in an error: {str(e)}")
+        except Exception:
+            logger.exception("Batch task resulted in an error")
         finally:
             self.batch_tasks.remove(task)
 
@@ -148,7 +146,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                         req = await asyncio.wait_for(
                             self.provider.batch_q.get(), timeout=self.timeout
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         break
                     batch.append(req)
                     self.provider.batch_q.task_done()
@@ -213,7 +211,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                     fut.set_exception(e)
 
             # Signal to batcher as well
-            raise e
+            raise
 
         finally:
             self.lock.release()
@@ -223,7 +221,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
 
 class OpenAIObservable(Observable[CompletionUsage]):
     @staticmethod
-    def usage_adapter(usage: Optional[CompletionUsage]) -> LLMUsage:
+    def usage_adapter(usage: CompletionUsage | None) -> LLMUsage:
         if usage is None:
             out = LLMUsage()
         else:
@@ -258,7 +256,7 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
     """
 
     tool_call_wrapper = OpenAIToolCall
-    llm: Union[openai.AsyncAzureOpenAI, openai.AsyncOpenAI]
+    llm: openai.AsyncAzureOpenAI | openai.AsyncOpenAI
     mode: ProviderModeT
     model_name: str
     interactive: bool
@@ -299,10 +297,7 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
     async def prompt_agent(
         self,
         ag: AgentT,
-        prompt: Union[
-            list[ChatCompletionMessageParam],
-            ChatCompletionMessageParam,
-        ],
+        prompt: list[ChatCompletionMessageParam] | ChatCompletionMessageParam,
         **kwargs,
     ) -> Choice:
         """
@@ -336,20 +331,22 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
         ag.scratchpad += "Message:\n"
         ag.scratchpad += out.message.content + "\n"
 
-        if len(ag.TOOLS):
-            # attempt to parse tool call arguments
-            # BUG: OpenAI sometimes doesn't return a "tool_calls" reason and uses "stop" instead. Annoying.
-            if out.finish_reason == "tool_calls" or (
+        # attempt to parse tool call arguments
+        # BUG: OpenAI sometimes doesn't return a "tool_calls" reason and uses "stop" instead. Annoying.
+        if len(ag.TOOLS) and (
+            out.finish_reason == "tool_calls"
+            or (
                 out.finish_reason == "stop"
                 and out.message.tool_calls
                 and len(out.message.tool_calls)
-            ):
-                # Patch finish_reason if it was actually a tool call but didn't
-                # indicate it
-                out.finish_reason = "tool_calls"
-                # Append GPT response to next payload
-                # NOTE: This has to come before the next step of parsing
-                ag.tool_res_payload.append(out.message.model_dump())
+            )
+        ):
+            # Patch finish_reason if it was actually a tool call but didn't
+            # indicate it
+            out.finish_reason = "tool_calls"
+            # Append GPT response to next payload
+            # NOTE: This has to come before the next step of parsing
+            ag.tool_res_payload.append(out.message.model_dump())
 
         logger.debug(f"Received response: {out.message.content}")
 
@@ -395,7 +392,7 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         interactive: bool = False,
         batch_size: int = DEFAULT_BATCH_SIZE,
         n_workers: int = 1,
-        batch_handler: Optional[OpenAIBatchAPIHelper] = None,
+        batch_handler: OpenAIBatchAPIHelper | None = None,
         quiet: bool = False,
         resource_endpoint: str = "https://cognitiveservices.azure.com/.default",
         **kwargs,
@@ -555,8 +552,8 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
             # Cancel batch before we terminate
             if batch.status not in {"completed", "failed"}:
                 await self.llm.batches.cancel(batch.id)
-            logger.error(f"Error retrieving batch! {str(e)}")
-            raise e
+            logger.error(f"Error retrieving batch! {e!s}")
+            raise
 
         return batch
 

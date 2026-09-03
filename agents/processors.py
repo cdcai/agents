@@ -237,8 +237,8 @@ class SeqProcessor[AgentT: Agent, DataInputT](_Processor[AgentT, DataInputT]):
                 self.in_q.task_done()
                 raise
 
-            except Exception as e:
-                logger.error(f"[_worker - {worker_name}]: Task {id} failed, {str(e)}")
+            except Exception:
+                logger.exception(f"[_worker - {worker_name}]: Task {id} failed")
                 errored = True
 
             self.in_q.task_done()
@@ -413,8 +413,8 @@ class AllCallProcessor[AgentT: Agent, DataInputT](_Processor[AgentT, DataInputT]
                 logger.error(f"[_agent_handler]: No answer was provided for query {id}")
                 errored = True
 
-        except Exception as e:
-            logger.error(f"[_agent_handler]: Task {id} failed, {e!s}", exc_info=True)
+        except Exception:
+            logger.exception(f"[_agent_handler]: Task {id} failed")
             errored = True
 
         if errored:
@@ -432,7 +432,7 @@ class AllCallProcessor[AgentT: Agent, DataInputT](_Processor[AgentT, DataInputT]
                     f"[_agent_handler]: Task {id} - {retry_left} retries remaining"
                 )
                 await self.in_q.put((id, retry_left, agent))
-                return None
+                return
 
         await self.out_q.put((id, agent))
         self.pbar.update()

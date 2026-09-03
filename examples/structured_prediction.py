@@ -6,11 +6,13 @@ Demo of structured returns and predictions using two agents:
 Sean Browning
 """
 import asyncio
-import agents
-from pydantic import BaseModel, Field
-from typing import List, Literal
 import logging
+from typing import Literal
+
 import dotenv
+from pydantic import BaseModel, Field
+
+import agents
 
 # NOTE: This loads in env vars for openAI
 dotenv.load_dotenv()
@@ -23,13 +25,13 @@ class Answer(BaseModel):
     """
     Response we expect from question answering agent
     """
-    answer: List[Literal["A", "B", "C", "D"]] = Field(description="Answer to the question")
+    answer: list[Literal["A", "B", "C", "D"]] = Field(description="Answer to the question")
 
 class QuestionandAnswer(Answer):
     """
     The response body we expect question producing agent (Q + A)
     """
-    question: List[str] = Field(description="Question text that includes the question and response options, but NOT the answer")
+    question: list[str] = Field(description="Question text that includes the question and response options, but NOT the answer")
 
 
 class QAGenerator(agents.StructuredOutputAgent):
