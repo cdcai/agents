@@ -1,33 +1,34 @@
 import asyncio
 import logging
 from abc import ABCMeta, abstractmethod
+from collections.abc import Iterator, Sequence
 from itertools import islice
-from typing import Generic, Iterator, List, Sequence, Tuple, Type, TypeVar, Union
+from typing import Any
 
 import polars as pl
 import tqdm.asyncio as tqdm
 
-from .abstract import A, P, _Provider
+from .abstract import _Provider
 from .agent import Agent
 
 logger = logging.getLogger(__name__)
 
-DataInput = TypeVar("DataInput", Sequence, pl.DataFrame)
+type Placeholder = str | tuple[str, ...] | dict[str, Any]
 
 
-class _Processor(Generic[A, P, DataInput], metaclass=ABCMeta):
+class _Processor[AgentT: Agent, DataInputT](metaclass=ABCMeta):
     """
     A virtual class for a processor that maps over a large iterable
     where 1 output is expected for every 1 input
     """
 
-    data: DataInput
+    data: DataInputT
 
     def __init__(
         self,
-        data: DataInput,
-        agent_class: Type[A],
-        provider: P,
+        data: DataInputT,
+        agent_class: type[AgentT],
+        provider: _Provider[AgentT],
         batch_size: int,
         n_retry: int = 5,
         **kwargs,
@@ -49,23 +50,25 @@ class _Processor(Generic[A, P, DataInput], metaclass=ABCMeta):
         self.n_retry = n_retry
         self.agent_kwargs = kwargs
         self.provider = provider
-        self.agents: List[Agent] = []
+        self.agents: list[AgentT] = []
 
         # Parallel queues
         #                                idx, retries remaining, batch
-        self.in_q: asyncio.PriorityQueue[Tuple[int, int, A]] = asyncio.PriorityQueue()
+        self.in_q: asyncio.PriorityQueue[tuple[int, int, AgentT]] = (
+            asyncio.PriorityQueue()
+        )
         #                                        idx, response
-        self.out_q: asyncio.PriorityQueue[Tuple[int, A]] = asyncio.PriorityQueue()
+        self.out_q: asyncio.PriorityQueue[tuple[int, AgentT]] = asyncio.PriorityQueue()
 
     @abstractmethod
-    def _iter(self) -> Iterator:
+    def _iter(self) -> Iterator[DataInputT]:
         """
         Abstract method that should return self.data chunked by self.batch_size
         """
         raise NotImplementedError()
 
     @abstractmethod
-    def _placeholder(self, batch: DataInput) -> List[Union[str, Tuple[str, ...]]]:
+    def _placeholder(self, batch: DataInputT) -> list[Placeholder]:
         """
         Abstract method which should return an appropriately sized placholder data piece
         that will be inserted in place of a real prediction if we encounter an error
@@ -73,22 +76,22 @@ class _Processor(Generic[A, P, DataInput], metaclass=ABCMeta):
         raise NotImplementedError()
 
     @abstractmethod
-    async def process(self):
+    async def process(self) -> list[Any]:
         """
         Process all samples from input data using language agent, splitting by chunk size specified at init
 
         :return Iterable: The predicted values after mapping over the input iterable (also stored in self.predicted)
         """
-        pass
+        raise NotImplementedError()
 
     @staticmethod
-    def _batch_format(batch: DataInput) -> str:
+    def _batch_format(batch: DataInputT) -> str:
         """
         An optional formatter to convert batch into a str
         """
         return str(batch)
 
-    def _spawn_agent(self, batch: DataInput, **kwargs) -> A:
+    def _spawn_agent(self, batch: DataInputT, **kwargs: Any) -> AgentT:
         """
         Spawn agent for next run, formatting batch as appropriate
 
@@ -107,7 +110,7 @@ class _Processor(Generic[A, P, DataInput], metaclass=ABCMeta):
 
         return out
 
-    def _load_inqueue(self):
+    def _load_inqueue(self) -> None:
         """
         Load inqueue for parallel processing
         """
@@ -118,8 +121,8 @@ class _Processor(Generic[A, P, DataInput], metaclass=ABCMeta):
         self.error_tasks = 0
 
     @staticmethod
-    def dequeue(q: asyncio.Queue) -> list:
-        out = []
+    def dequeue[QueueItemT](q: asyncio.Queue[QueueItemT]) -> list[QueueItemT]:
+        out: list[QueueItemT] = []
         while q.qsize() > 0:
             try:
                 it = q.get_nowait()
@@ -130,16 +133,16 @@ class _Processor(Generic[A, P, DataInput], metaclass=ABCMeta):
         return out
 
 
-class SeqProcessor(_Processor):
+class SeqProcessor[AgentT: Agent, DataInputT](_Processor[AgentT, DataInputT]):
     """
     A Batch Processor that handles resolving all agents sequentially (with some concurrency if n_workers > 1)
     """
 
     def __init__(
         self,
-        data: DataInput,
-        agent_class: Type[A],
-        provider: _Provider,
+        data: DataInputT,
+        agent_class: type[AgentT],
+        provider: _Provider[AgentT],
         batch_size: int = 5,
         n_workers: int = 1,
         n_retry: int = 5,
@@ -161,7 +164,7 @@ class SeqProcessor(_Processor):
 
         super().__init__(data, agent_class, provider, batch_size, n_retry, **kwargs)
 
-    async def process(self):
+    async def process(self) -> list[Any]:
         # Either the workers we called for at init or the number of batches we have to process
         # (whichever is fewer)
         self._load_inqueue()
@@ -207,14 +210,21 @@ class SeqProcessor(_Processor):
 
         return out
 
-    async def _worker(self, worker_name: str):
+    async def _worker(self, worker_name: str) -> None:
         """
         Agent worker
         """
         while True:
             try:
                 (id, retry_left, agent) = await self.in_q.get()
-                errored = False
+            except asyncio.CancelledError:
+                logger.info(
+                    f"[_worker - {worker_name}]: Got CancelledError, terminating."
+                )
+                break
+
+            errored = False
+            try:
                 await agent(reset=True)
 
                 if len(agent.answer) == 0:
@@ -224,13 +234,11 @@ class SeqProcessor(_Processor):
                     errored = True
 
             except asyncio.CancelledError:
-                logger.info(
-                    f"[_worker - {worker_name}]: Got CancelledError, terminating."
-                )
-                break
+                self.in_q.task_done()
+                raise
 
-            except Exception as e:
-                logger.error(f"[_worker - {worker_name}]: Task {id} failed, {str(e)}")
+            except Exception:
+                logger.exception(f"[_worker - {worker_name}]: Task {id} failed")
                 errored = True
 
             self.in_q.task_done()
@@ -256,14 +264,14 @@ class SeqProcessor(_Processor):
             self.pbar.update()
 
 
-class _ProcessorIterable(_Processor[A, P, Sequence]):
+class _ProcessorIterable[AgentT: Agent](_Processor[AgentT, Sequence[Any]]):
     """
     A batch processor which maps an Agent over elements of an iterable (usually a list[str]).
 
     Each chunk of the iterable is operated on independently.
     """
 
-    def _iter(self) -> Iterator:
+    def _iter(self) -> Iterator[Sequence[Any]]:
         """
         Just a backport of itertools.batched
 
@@ -273,7 +281,7 @@ class _ProcessorIterable(_Processor[A, P, Sequence]):
         while batch := tuple(islice(iterator, self.batch_size)):
             yield batch
 
-    def _placeholder(self, batch: Sequence):
+    def _placeholder(self, batch: Sequence[Any]) -> list[Placeholder]:
         """
         Returns a `List[str]` with `len() == len(batch)`
         """
@@ -285,7 +293,10 @@ class _ProcessorIterable(_Processor[A, P, Sequence]):
         return [resp_obj] * len(batch)
 
 
-class ProcessorIterable(_ProcessorIterable, SeqProcessor):
+class ProcessorIterable[AgentT: Agent](
+    _ProcessorIterable[AgentT],
+    SeqProcessor[AgentT, Sequence[Any]],
+):
     """
     A processor which operates on chunks of an iterable with `n_workers` agents at a time.
     Each chunk must be independent, as state will not be maintained between agent calls.
@@ -294,7 +305,7 @@ class ProcessorIterable(_ProcessorIterable, SeqProcessor):
     """
 
 
-class _ProcessorDF(_Processor[A, P, pl.DataFrame]):
+class _ProcessorDF[AgentT: Agent](_Processor[AgentT, pl.DataFrame]):
     """
     A Processor which operates on chunks of a polars dataframe.
     Each chunk must be independent, as state will not be maintained between agent calls.
@@ -305,7 +316,7 @@ class _ProcessorDF(_Processor[A, P, pl.DataFrame]):
     def _iter(self) -> Iterator[pl.DataFrame]:
         return self.data.iter_slices(self.batch_size)
 
-    def _placeholder(self, batch: pl.DataFrame):
+    def _placeholder(self, batch: pl.DataFrame) -> list[Placeholder]:
         """
         Returns a List[str] with len() == batch.height
         """
@@ -324,13 +335,16 @@ class _ProcessorDF(_Processor[A, P, pl.DataFrame]):
         return batch.write_ndjson()
 
 
-class ProcessorDF(_ProcessorDF, SeqProcessor):
+class ProcessorDF[AgentT: Agent](
+    _ProcessorDF[AgentT],
+    SeqProcessor[AgentT, pl.DataFrame],
+):
     """
     A processor which operates on chunks of a polars dataframe with `n_workers` agents at a time.
     """
 
 
-class AllCallProcessor(_Processor):
+class AllCallProcessor[AgentT: Agent, DataInputT](_Processor[AgentT, DataInputT]):
     """
     A processor which operates on all elements of an iterable, firing all agent calls at once.
     This is useful when using a Batch API
@@ -339,7 +353,7 @@ class AllCallProcessor(_Processor):
     The main user-facing method after init is :func:`process()`
     """
 
-    async def process(self):
+    async def process(self) -> list[Any]:
         """
         Process all samples from input data using language agents.
         """
@@ -385,7 +399,7 @@ class AllCallProcessor(_Processor):
 
         return out
 
-    async def _agent_handler(self, agent: Agent, id: int, retry_left: int) -> None:
+    async def _agent_handler(self, agent: AgentT, id: int, retry_left: int) -> None:
         """
         Handle a single agent call, returning the agent into the out_q.
 
@@ -399,8 +413,8 @@ class AllCallProcessor(_Processor):
                 logger.error(f"[_agent_handler]: No answer was provided for query {id}")
                 errored = True
 
-        except Exception as e:
-            logger.error(f"[_agent_handler]: Task {id} failed, {e!s}", exc_info=True)
+        except Exception:
+            logger.exception(f"[_agent_handler]: Task {id} failed")
             errored = True
 
         if errored:
@@ -418,13 +432,16 @@ class AllCallProcessor(_Processor):
                     f"[_agent_handler]: Task {id} - {retry_left} retries remaining"
                 )
                 await self.in_q.put((id, retry_left, agent))
-                return None
+                return
 
         await self.out_q.put((id, agent))
         self.pbar.update()
 
 
-class BatchProcessorIterable(_ProcessorIterable, AllCallProcessor):
+class BatchProcessorIterable[AgentT: Agent](
+    _ProcessorIterable[AgentT],
+    AllCallProcessor[AgentT, Sequence[Any]],
+):
     """
     A processor which operates on chunks of an iterable calling all agents at once.
     This assumes you're using a Batch API Provider (e.g. Azure OpenAI Batch API).
@@ -434,7 +451,10 @@ class BatchProcessorIterable(_ProcessorIterable, AllCallProcessor):
     """
 
 
-class BatchProcessorDF(_ProcessorDF, AllCallProcessor):
+class BatchProcessorDF[AgentT: Agent](
+    _ProcessorDF[AgentT],
+    AllCallProcessor[AgentT, pl.DataFrame],
+):
     """
     A processor which operates on chunks of an polars DataFrame calling all agents at once.
     This assumes you're using a Batch API Provider (e.g. Azure OpenAI Batch API).

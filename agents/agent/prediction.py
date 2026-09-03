@@ -4,11 +4,12 @@ Sean Browning (oet5)
 """
 
 import logging
-from typing import Callable, List, Literal, Optional, Any
+from collections.abc import Callable
+from typing import Any, Literal
 
 import pydantic
 
-from ..abstract import _StoppingCondition, _Provider
+from ..abstract import _Provider, _StoppingCondition
 from .base import StructuredOutputAgent
 
 logger = logging.getLogger(__name__)
@@ -27,13 +28,13 @@ class PredictionAgent(StructuredOutputAgent):
     def __init__(
         self,
         labels: list[str],
-        expected_len: Optional[int] = None,
-        stopping_condition: Optional[_StoppingCondition] = None,
-        model_name: Optional[str] = None,
-        provider: Optional[_Provider] = None,
-        tools: Optional[List[dict]] = None,
-        callbacks: Optional[List[Callable]] = None,
-        oai_kwargs: Optional[dict[str, Any]] = None,
+        expected_len: int | None = None,
+        stopping_condition: _StoppingCondition | None = None,
+        model_name: str | None = None,
+        provider: _Provider | None = None,
+        tools: list[dict] | None = None,
+        callbacks: list[Callable] | None = None,
+        oai_kwargs: dict[str, Any] | None = None,
         **fmt_kwargs,
     ):
         """
@@ -65,7 +66,7 @@ class PredictionAgent(StructuredOutputAgent):
         )
 
     def _build_pydantic_model(
-        self, length_constraint: Optional[int] = None
+        self, length_constraint: int | None = None
     ) -> type[pydantic.BaseModel]:
         """
         Construct a pydantic model that we'll use to force the LLM to return a structured response
@@ -73,7 +74,7 @@ class PredictionAgent(StructuredOutputAgent):
 
         class classify(pydantic.BaseModel):
             # NOTE: This is kind of hacky since we're using runtime type-hints
-            labels: List[Literal[tuple(self.labels)]] = pydantic.Field(  # type: ignore
+            labels: list[Literal[tuple(self.labels)]] = pydantic.Field(  # type: ignore
                 description="Classify the input data into one of the possible categories"
             )
 
@@ -101,7 +102,7 @@ class PredictionAgentWithJustification(PredictionAgent):
     This has the additional stipulation that the number of labels and justifications must agree in number, which is enforced by pydantic post-hoc.
     """
 
-    def _build_pydantic_model(self, length_constraint: Optional[int] = None):
+    def _build_pydantic_model(self, length_constraint: int | None = None):
         """
         Construct a pydantic model that we'll use to force the LLM to return a structured response.
         This will also include a justification for the classification.
@@ -109,10 +110,10 @@ class PredictionAgentWithJustification(PredictionAgent):
 
         class classify(pydantic.BaseModel):
             # NOTE: This is kind of hacky since we're using runtime type-hints
-            labels: List[Literal[tuple(self.labels)]] = pydantic.Field(  # type: ignore
+            labels: list[Literal[tuple(self.labels)]] = pydantic.Field(  # type: ignore
                 description="Classify the input data into one of the possible categories"
             )
-            justification: List[str] = pydantic.Field(
+            justification: list[str] = pydantic.Field(
                 description="SHORT description explaining your reasoning for the classfication"
             )
 

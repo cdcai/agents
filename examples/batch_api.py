@@ -4,13 +4,12 @@ Testing the OpenAI Batch API in a few different scenarios.
 
 import asyncio
 import logging
-from typing import List, Optional
 
 import pydantic
 from dotenv import load_dotenv
 
 import agents.observability as agents
-from agents import agent_callable, BatchProcessorIterable
+from agents import BatchProcessorIterable, agent_callable
 
 load_dotenv()
 
@@ -43,12 +42,9 @@ class KnockKnockAgent(agents.StructuredOutputAgent):
     2. Write the joke using the KnockKnock model, which should consist of a setup (the part that follows "who's there?") and a punchline (the part that follows "who?").
     """
 
-    # Making temp higher
-    oai_kwargs = {"temperature": 0.9, "parallel_tool_calls": False}
-
     def __init__(
         self,
-        model_name: Optional[str] = None,
+        model_name: str | None = None,
         stopping_condition=None,
         provider=None,
         tools=None,
@@ -56,6 +52,12 @@ class KnockKnockAgent(agents.StructuredOutputAgent):
         oai_kwargs=None,
         **fmt_kwargs,
     ):
+
+        if oai_kwargs is not None:
+                # Making temp higher
+            oai_kwargs.update({"temperature": 0.9, "parallel_tool_calls": False})
+        else:
+            oai_kwargs = {"temperature": 0.9, "parallel_tool_calls": False}
 
         super().__init__(
             response_model=KnockKnock,
@@ -89,7 +91,7 @@ class KnockKnockJudge(agents.PredictionAgent):
     {jokes}
     """.strip()
 
-    def __init__(self, jokes: List[str], provider=None, **fmt_kwargs):
+    def __init__(self, jokes: list[str], provider=None, **fmt_kwargs):
         labels = [str(i) for i, _ in enumerate(jokes)]
 
         if fmt_kwargs is None:
@@ -120,7 +122,7 @@ async def agents_example():
     print("Got the following entries:")
     print(
         "\n".join(
-            f"Joke {i}:\n{str(KnockKnock.model_validate(res))}"
+            f"Joke {i}:\n{KnockKnock.model_validate(res)!s}"
             for i, res in enumerate(jokes)
         )
     )
@@ -138,9 +140,7 @@ async def agents_example():
     best_joke_idx = judge.answer["labels"][0]
 
     print(
-        "The judge crowned a winner!:\n\n{}".format(
-            str(KnockKnock.model_validate(jokes[int(best_joke_idx)]))
-        )
+        f"The judge crowned a winner!:\n\n{KnockKnock.model_validate(jokes[int(best_joke_idx)])!s}"
     )
 
     print(f"Token usage: {usage}")

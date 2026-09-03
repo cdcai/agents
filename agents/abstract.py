@@ -8,25 +8,18 @@ import json
 import logging
 import os
 from asyncio import Task, create_task, to_thread
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from inspect import iscoroutinefunction
 from typing import (
     TYPE_CHECKING,
     Any,
-    Awaitable,
-    Callable,
-    Dict,
-    Generic,
-    List,
     Literal,
-    Optional,
-    Type,
-    TypeVar,
     Union,
 )
 
 if TYPE_CHECKING:
-    from openai.types.chat import ChatCompletionMessage, ChatCompletionMessageParam
+    from openai.types.chat import ChatCompletionMessageParam
     from openai.types.chat.chat_completion import ChatCompletion, Choice
 
 from pydantic import BaseModel, ValidationError
@@ -35,14 +28,11 @@ from .observability import Observable
 
 logger = logging.getLogger(__name__)
 
-Message = Union[dict[str, str], "ChatCompletionMessageParam"]
-
-P = TypeVar("P", bound="_Provider")
-A = TypeVar("A", bound="_Agent")
+Message = Union[dict[str, Any], "ChatCompletionMessageParam"]
 
 
 @dataclass
-class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
+class _ToolCall[AgentT: _Agent](metaclass=abc.ABCMeta):
     """
     A tool call abstract class which handles validation and execution of requested tool calls
     using asyncio.
@@ -58,7 +48,7 @@ class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
     """
 
     "Agent instance calling the tool"
-    agent: A
+    agent: AgentT
 
     "The tool call object containing the tool id, name, and args"
     tool_call: Any
@@ -67,13 +57,13 @@ class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
     func: Callable = field(init=False)
 
     "Named arguments passed to `func`"
-    kwargs: Dict[str, Any] = field(default_factory=dict, init=False)
+    kwargs: dict[str, Any] = field(default_factory=dict, init=False)
 
     "Any errors to be returned to the agent (failure to retrieve function or parse args, etc)"
-    errors: Optional[str] = field(init=False, default=None)
+    errors: str | None = field(init=False, default=None)
 
     "An asyncio task running the tool call"
-    task: Optional[Task] = field(init=False, default=None)
+    task: Task | None = field(init=False, default=None)
 
     @property
     @abc.abstractmethod
@@ -105,8 +95,8 @@ class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
     @staticmethod
     @abc.abstractmethod
     def _construct_return_message(
-        id: str, response: Union[str, BaseModel]
-    ) -> Dict[str, Union[str, BaseModel]]:
+        id: str, response: str | BaseModel
+    ) -> dict[str, str | BaseModel]:
         """
         A function that constructs the provider-appropriate return message for the tool call.
 
@@ -115,12 +105,12 @@ class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
             response (str | BaseModel): The response to the requested tool call to return to the model
 
         Returns:
-            out (Dict[str, str | BaseModel]): A properly formatted message payload with the output of the tool call for the language agent to handle
+            out (dict[str, str | BaseModel]): A properly formatted message payload with the output of the tool call for the language agent to handle
         """
         raise NotImplementedError()
 
     @property
-    def result(self) -> Optional[Dict[str, Union[str, BaseModel]]]:
+    def result(self) -> dict[str, str | BaseModel] | None:
         """
         Return tool call result, if available
         - calls the result() method on the task
@@ -156,11 +146,11 @@ class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
             self.kwargs.update(json.loads(self.arg_str))
         except json.JSONDecodeError as e:
             logger.warning(
-                f"Tool call {self.func_name} in response couldn't be decoded: {str(e)}"
+                f"Tool call {self.func_name} in response couldn't be decoded: {e!s}"
             )
             self.errors = "The arguments to your previous tool call couldn't be parsed correctly. Please ensure you properly escapse quotes and construct a valid JSON payload."
 
-    def __call__(self) -> Task[Dict[str, Union[str, BaseModel]]]:
+    def __call__(self) -> Task[dict[str, str | BaseModel]]:
         """
         Return async task to gather later
         - Can only be fired once
@@ -170,7 +160,7 @@ class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
             self.task = create_task(self.handler(), name=self.id)
         return self.task
 
-    async def handler(self) -> Dict[str, Union[str, BaseModel]]:
+    async def handler(self) -> dict[str, str | BaseModel]:
         """
         A handler coroutine that wraps a tool call, either awaiting it if it's also a co-routine, or sending
         it to a thread to be handled separately if it's sequential.
@@ -178,7 +168,7 @@ class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
         This first checks that the function and arguments provided by the language agent are valid before attempting to call the tool.
 
         Returns:
-            out (Dict[str, str | BaseModel]): A tool call reply payload for the language agent
+            out (dict[str, str | BaseModel]): A tool call reply payload for the language agent
         """
         self._check_and_assign_func()
         self._check_and_assign_kwargs()
@@ -203,39 +193,38 @@ class _ToolCall(Generic[A], metaclass=abc.ABCMeta):
         return self._construct_return_message(self.id, res)
 
 
-class _Provider(Observable, Generic[A], metaclass=abc.ABCMeta):
+class _Provider[AgentT: _Agent](Observable, metaclass=abc.ABCMeta):
     """
     A LLM Provider which should provide the standard methods for prompting and agent
     authenticating, etc.
     """
 
     "The tool_call class specific to this provider that will be used to evaluate any tool calls from the model"
-    tool_call_wrapper: Type[_ToolCall]
+    tool_call_wrapper: type[_ToolCall[Any]]
     "The method that will be used to call the OpenAI API, e.g. openai.chat.completions.create"
     endpoint_fn: Callable[..., Awaitable["ChatCompletion"]]
 
     mode: Literal["chat", "batch"]
 
-    def __init__(self, model_name: str, **kwargs):
+    def __init__(self, model_name: str, **kwargs: Any) -> None:
         super().__init__()
-        pass
 
     @abc.abstractmethod
-    def authenticate(self):
-        pass
+    def authenticate(self) -> None:
+        raise NotImplementedError()
 
     @abc.abstractmethod
-    async def prompt_agent(self, ag: A, prompt: Any, **kwargs):
-        pass
+    async def prompt_agent(self, ag: AgentT, prompt: Any, **kwargs: Any) -> "Choice":
+        raise NotImplementedError()
 
     async def __aenter__(self):
         return self
 
-    async def __aexit__(self, exc_type, exc_value, traceback):
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
         """
         Close the provider, if necessary.
         """
-        pass
+        return
 
 
 class _StoppingCondition(metaclass=abc.ABCMeta):
@@ -247,7 +236,7 @@ class _StoppingCondition(metaclass=abc.ABCMeta):
     """
 
     @abc.abstractmethod
-    def __call__(self, cls: "_Agent", response: "Choice") -> Optional[Any]:
+    def __call__(self, cls: "_Agent", response: "Choice") -> Any | None:
         raise NotImplementedError()
 
 
@@ -260,29 +249,28 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
     answer: Any = ""
     BASE_PROMPT: str = ""
     SYSTEM_PROMPT: str = ""
-    oai_kwargs: dict
-    TOOLS: list
-    CALLBACKS: list
-    callback_output: list
-    tool_res_payload: List[Message]
-    provider: _Provider
-    placeholder: Optional[Any]
+    oai_kwargs: dict[str, Any]
+    TOOLS: list[Any]
+    CALLBACKS: list[Callable[..., Any]]
+    callback_output: list[Any]
+    tool_res_payload: list[dict[str, Any]]
+    provider: _Provider[Any]
+    placeholder: Any | None
 
     def __init__(
         self,
         stopping_condition: _StoppingCondition,
-        model_name: Optional[str] = None,
-        provider: Optional[_Provider] = None,
-        tools: Optional[List[dict]] = None,
-        callbacks: Optional[List[Callable]] = None,
-        oai_kwargs: Optional[dict[str, Any]] = None,
-        **fmt_kwargs,
-    ):
+        model_name: str | None = None,
+        provider: _Provider[Any] | None = None,
+        tools: Sequence[Any] | None = None,
+        callbacks: Sequence[Callable[..., Any]] | None = None,
+        oai_kwargs: dict[str, Any] | None = None,
+        **fmt_kwargs: Any,
+    ) -> None:
         super().__init__()
-        pass
 
     @abc.abstractmethod
-    async def step(self):
+    async def step(self) -> None:
         """
         Run a single "step" of the agent logic.
         Handles prompting OpenAI, optionally handling tool calls, and determining whether we've
@@ -291,13 +279,14 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def _check_stop_condition(self, response: "ChatCompletionMessage") -> None:
+    def _check_stop_condition(self, response: "Choice") -> None:
         """
         Called from within :func:`step()`.
         Checks whether our stop condition has been met and handles assignment of answer, if so.
 
         It's broken out this way because we may not always want to use message.content as the answer (tool call output, for instance)
         """
+        raise NotImplementedError()
 
     @abc.abstractmethod
     def format_prompt(self) -> str:
@@ -308,11 +297,11 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def get_next_messages(self) -> List[Message]:
+    def get_next_messages(self) -> list[Message]:
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def _handle_tool_calls(self, response: "Choice") -> None:
+    async def _handle_tool_calls(self, response: "Choice") -> None:
         raise NotImplementedError()
 
     @property
@@ -328,19 +317,19 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
         return self.truncated
 
     @abc.abstractmethod
-    def dump(self, outfile: Union[str, os.PathLike]) -> None:
+    def dump(self, outfile: str | os.PathLike) -> None:
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def reset(self):
+    def reset(self) -> None:
         raise NotImplementedError()
 
 
-class _BatchAPIHelper(Generic[P], metaclass=abc.ABCMeta):
+class _BatchAPIHelper[ProviderT: _Provider[Any]](metaclass=abc.ABCMeta):
     timeout: float = 2.0
     task: Task
-    batch_tasks: List[Task]
-    provider: P
+    batch_tasks: list[Task]
+    provider: ProviderT
 
     async def close(self):
         """
@@ -355,8 +344,26 @@ class _BatchAPIHelper(Generic[P], metaclass=abc.ABCMeta):
         await asyncio.gather(*all_tasks, return_exceptions=True)
 
     @abc.abstractmethod
-    def register_provider(self, provider: P):
+    def register_provider(self, provider: ProviderT) -> None:
         """
         Main method to link provider and start batching task via asyncio
         """
-        pass
+        raise NotImplementedError()
+
+
+class _Callback[CallingAgentT: _Agent](metaclass=abc.ABCMeta):
+    """
+    A Callback virtual class
+    """
+
+    @abc.abstractmethod
+    async def __call__(self, cls: CallingAgentT, answer: Any, scratchpad: str) -> None:
+        """
+        Primary method called by agent during callback process
+
+        :param Agent cls: Instantitated class of calling agent for possible modification
+        :param answer: The final response of the calling Agent
+        :param str scratchpad: The full interaction history of the calling Agent
+
+        """
+        raise NotImplementedError()

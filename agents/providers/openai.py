@@ -5,15 +5,8 @@ import os
 from dataclasses import dataclass
 from io import BytesIO, StringIO
 from typing import (
-    Dict,
-    Generic,
-    List,
     Literal,
-    Optional,
-    Tuple,
     TypedDict,
-    TypeVar,
-    Union,
 )
 
 import backoff
@@ -22,14 +15,14 @@ try:
     import openai
 except ImportError as e:
     raise ImportError(
-        f"OpenAI package must be installed to use an OpenAI provider!\n{str(e)}"
+        f"OpenAI package must be installed to use an OpenAI provider!\n{e!s}"
     )
 import tqdm.asyncio as tqdm
 
 try:
     from azure.identity.aio import ClientSecretCredential, get_bearer_token_provider
 except ImportError as e:
-    raise ImportError(f"azure.identity is required for OpenAI providers!\n{str(e)}")
+    raise ImportError(f"azure.identity is required for OpenAI providers!\n{e!s}")
 
 from openai.types import (
     Batch,
@@ -43,15 +36,15 @@ from openai.types.chat import (
     ChatCompletionMessageParam,
     ChatCompletionMessageToolCall,
 )
+from openai.types.chat.chat_completion import Choice
 from pydantic import BaseModel
 
-from ..abstract import A, _BatchAPIHelper, _Provider, _ToolCall
+from ..abstract import _Agent, _BatchAPIHelper, _Provider, _ToolCall
 from ..observability import LLMUsage, Observable
 
 DEFAULT_BATCH_SIZE = 1000
-ProviderMode = TypeVar("ProviderMode", Literal["chat"], Literal["batch"])
-
 logger = logging.getLogger(__name__)
+
 
 # HACK: OpenAI does not (yet) implement batch request input type
 # See: https://github.com/openai/openai-python/issues/1937
@@ -59,7 +52,7 @@ class BatchRequestInput(TypedDict):
     custom_id: str
     method: Literal["POST"]
     url: Literal["/v1/chat/completions", "/v1/embeddings", "/v1/completions"]
-    body: Union[EmbeddingCreateParams, CompletionCreateParams]
+    body: EmbeddingCreateParams | CompletionCreateParams
 
 
 @dataclass
@@ -84,8 +77,8 @@ class OpenAIToolCall(_ToolCall):
 
     @staticmethod
     def _construct_return_message(
-        id: str, response: Union[str, BaseModel]
-    ) -> Dict[str, Union[str, BaseModel]]:
+        id: str, response: str | BaseModel
+    ) -> dict[str, str | BaseModel]:
         return {"tool_call_id": id, "role": "tool", "content": response}
 
 
@@ -122,8 +115,8 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
             task.result()
         except asyncio.CancelledError:
             logger.info("Batch task was cancelled.")
-        except Exception as e:
-            logger.warning(f"Batch task resulted in an error: {str(e)}")
+        except Exception:
+            logger.exception("Batch task resulted in an error")
         finally:
             self.batch_tasks.remove(task)
 
@@ -153,7 +146,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                         req = await asyncio.wait_for(
                             self.provider.batch_q.get(), timeout=self.timeout
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         break
                     batch.append(req)
                     self.provider.batch_q.task_done()
@@ -173,7 +166,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
 
                 break
 
-    async def _batch_handler(self, batch: List[BatchRequestInput]) -> None:
+    async def _batch_handler(self, batch: list[BatchRequestInput]) -> None:
         """
         A handler method that submits the batch of tasks to OpenAI and retrieves the results
         when finished.
@@ -218,7 +211,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                     fut.set_exception(e)
 
             # Signal to batcher as well
-            raise e
+            raise
 
         finally:
             self.lock.release()
@@ -228,7 +221,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
 
 class OpenAIObservable(Observable[CompletionUsage]):
     @staticmethod
-    def usage_adapter(usage: Optional[CompletionUsage]) -> LLMUsage:
+    def usage_adapter(usage: CompletionUsage | None) -> LLMUsage:
         if usage is None:
             out = LLMUsage()
         else:
@@ -241,7 +234,9 @@ class OpenAIObservable(Observable[CompletionUsage]):
         return out
 
 
-class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
+class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
+    _Provider[AgentT], OpenAIObservable
+):
     """
     An Azure OpenAI Provider for language Agents.
 
@@ -261,8 +256,8 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
     """
 
     tool_call_wrapper = OpenAIToolCall
-    llm: Union[openai.AsyncAzureOpenAI, openai.AsyncOpenAI]
-    mode: ProviderMode
+    llm: openai.AsyncAzureOpenAI | openai.AsyncOpenAI
+    mode: ProviderModeT
     model_name: str
     interactive: bool
     resource_endpoint: str
@@ -301,13 +296,10 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
     @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3)
     async def prompt_agent(
         self,
-        ag: A,
-        prompt: Union[
-            List[ChatCompletionMessageParam],
-            ChatCompletionMessageParam,
-        ],
+        ag: AgentT,
+        prompt: list[ChatCompletionMessageParam] | ChatCompletionMessageParam,
         **kwargs,
-    ):
+    ) -> Choice:
         """
         An async version of the main OAI prompting logic.
 
@@ -339,20 +331,22 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
         ag.scratchpad += "Message:\n"
         ag.scratchpad += out.message.content + "\n"
 
-        if len(ag.TOOLS):
-            # attempt to parse tool call arguments
-            # BUG: OpenAI sometimes doesn't return a "tool_calls" reason and uses "stop" instead. Annoying.
-            if out.finish_reason == "tool_calls" or (
+        # attempt to parse tool call arguments
+        # BUG: OpenAI sometimes doesn't return a "tool_calls" reason and uses "stop" instead. Annoying.
+        if len(ag.TOOLS) and (
+            out.finish_reason == "tool_calls"
+            or (
                 out.finish_reason == "stop"
                 and out.message.tool_calls
                 and len(out.message.tool_calls)
-            ):
-                # Patch finish_reason if it was actually a tool call but didn't
-                # indicate it
-                out.finish_reason = "tool_calls"
-                # Append GPT response to next payload
-                # NOTE: This has to come before the next step of parsing
-                ag.tool_res_payload.append(out.message.model_dump())
+            )
+        ):
+            # Patch finish_reason if it was actually a tool call but didn't
+            # indicate it
+            out.finish_reason = "tool_calls"
+            # Append GPT response to next payload
+            # NOTE: This has to come before the next step of parsing
+            ag.tool_res_payload.append(out.message.model_dump())
 
         logger.debug(f"Received response: {out.message.content}")
 
@@ -368,7 +362,7 @@ class _AzureProvider(Generic[A, ProviderMode], _Provider[A], OpenAIObservable):
         return out
 
 
-class AzureOpenAIProvider(_AzureProvider[A, Literal["chat"]]):
+class AzureOpenAIProvider[AgentT: _Agent](_AzureProvider[AgentT, Literal["chat"]]):
     mode = "chat"
 
     def __init__(self, model_name: str, interactive: bool, **kwargs):
@@ -376,7 +370,9 @@ class AzureOpenAIProvider(_AzureProvider[A, Literal["chat"]]):
         self.endpoint_fn = self.round_trip_increment(self.llm.chat.completions.create)
 
 
-class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
+class AzureOpenAIBatchProvider[AgentT: _Agent](
+    _AzureProvider[AgentT, Literal["batch"]]
+):
     """
     Azure OpenAI using the Batch API
 
@@ -396,7 +392,7 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         interactive: bool = False,
         batch_size: int = DEFAULT_BATCH_SIZE,
         n_workers: int = 1,
-        batch_handler: Optional[OpenAIBatchAPIHelper] = None,
+        batch_handler: OpenAIBatchAPIHelper | None = None,
         quiet: bool = False,
         resource_endpoint: str = "https://cognitiveservices.azure.com/.default",
         **kwargs,
@@ -418,8 +414,8 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         self.batch_idx = 1
         self.batch_idx_lock = asyncio.Lock()
         self.endpoint_fn = self.query_batch_mode
-        self.batch_q: asyncio.Queue[Dict] = asyncio.Queue()
-        self.batch_out: Dict[str, asyncio.Future[ChatCompletion]] = {}
+        self.batch_q: asyncio.Queue[dict] = asyncio.Queue()
+        self.batch_out: dict[str, asyncio.Future[ChatCompletion]] = {}
         self.quiet = quiet
 
         if batch_handler is None:
@@ -445,7 +441,7 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
             self.batch_handler.pbar.close()
 
     async def query_batch_mode(
-        self, messages: List[ChatCompletionMessageParam], model: str, **kwargs
+        self, messages: list[ChatCompletionMessageParam], model: str, **kwargs
     ) -> ChatCompletion:
         async with self.batch_idx_lock:
             task_id = f"task-{self.batch_idx}"
@@ -478,12 +474,12 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
 
     @staticmethod
     def _create_batch_file(
-        tasks: List[BatchRequestInput],
-    ) -> Tuple[str, bytes, str]:
+        tasks: list[BatchRequestInput],
+    ) -> tuple[str, bytes, str]:
         """
         Create a batch file for the OpenAI Batch API
 
-        :param tasks: List of task dictionaries to be sent to OpenAI
+        :param tasks: list of task dictionaries to be sent to OpenAI
         :return: Tuple containing the file name, file content, and MIME type to send as an API payload
         """
 
@@ -499,13 +495,13 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
 
     async def send_batch(
         self,
-        tasks: List[BatchRequestInput],
+        tasks: list[BatchRequestInput],
         **kwargs,
     ) -> FileObject:
         """
         Send a batch file to OpenAI pending further processing.
 
-        :param tasks: List of task dictionaries to be sent to OpenAI
+        :param tasks: list of task dictionaries to be sent to OpenAI
         :param kwargs: Additional keyword arguments for the file upload (see OpenAI API documentation)
 
         :return: An OpenAI File object representing the uploaded batch file
@@ -556,12 +552,12 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
             # Cancel batch before we terminate
             if batch.status not in {"completed", "failed"}:
                 await self.llm.batches.cancel(batch.id)
-            logger.error(f"Error retrieving batch! {str(e)}")
-            raise e
+            logger.error(f"Error retrieving batch! {e!s}")
+            raise
 
         return batch
 
-    async def get_batch_results(self, batch: Batch) -> List[Dict]:
+    async def get_batch_results(self, batch: Batch) -> list[dict]:
         """
         Retrieve the results of a completed batch.
 
@@ -583,7 +579,7 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         return results
 
     @staticmethod
-    def _response_from_bytes(stream: bytes) -> List[Dict]:
+    def _response_from_bytes(stream: bytes) -> list[dict]:
         out = []
         with BytesIO() as buffer:
             buffer.write(stream)
@@ -594,7 +590,7 @@ class AzureOpenAIBatchProvider(_AzureProvider[A, Literal["batch"]]):
         return out
 
 
-class OpenAIProvider(AzureOpenAIProvider):
+class OpenAIProvider[AgentT: _Agent](AzureOpenAIProvider[AgentT]):
     """
     Standard (non-Azure) OpenAI provider
 
