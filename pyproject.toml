@@ -33,6 +33,7 @@ test = [
 dev = [
     "ruff>=0.16.5",
     "mypy>=2.3.1",
+    "python-dotenv>=1.2.3",
     "types-tqdm>=4.70.0.20260827",
 ]
 
