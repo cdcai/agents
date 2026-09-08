@@ -12,7 +12,7 @@ from .batch_progress import (
     BatchTracker,
     TqdmBatchProgressRenderer,
     format_batch_progress,
-    resolve_batch_progress_max_items,
+    validate_max_items,
 )
 from .callbacks import AgentCallback
 from .json_tool_gen import agent_callable, async_agent_callable
@@ -52,5 +52,5 @@ __all__ = [
     "agent_callable",
     "async_agent_callable",
     "format_batch_progress",
-    "resolve_batch_progress_max_items",
+    "validate_max_items",
 ]

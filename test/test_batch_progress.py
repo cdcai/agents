@@ -7,14 +7,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from agents.batch_progress import (
-    BATCH_PROGRESS_MAX_ITEMS_ENV_VAR,
-    DEFAULT_BATCH_PROGRESS_MAX_ITEMS,
     BatchProgressState,
     BatchRequestCounts,
     BatchSnapshot,
     BatchTracker,
     format_batch_progress,
-    resolve_batch_progress_max_items,
+    validate_max_items,
 )
 
 
@@ -227,51 +225,12 @@ def test_format_uses_unicode_tree_connectors():
     assert "├──" in output
     assert "└──" in output
 
-
-def test_resolve_max_items_defaults_and_reads_environment():
-    assert resolve_batch_progress_max_items(environ={}) == 10
-    assert DEFAULT_BATCH_PROGRESS_MAX_ITEMS == 10
-    assert (
-        resolve_batch_progress_max_items(
-            environ={BATCH_PROGRESS_MAX_ITEMS_ENV_VAR: "0"}
-        )
-        == 0
-    )
-    assert (
-        resolve_batch_progress_max_items(
-            environ={BATCH_PROGRESS_MAX_ITEMS_ENV_VAR: " 7 "}
-        )
-        == 7
-    )
-
-
-def test_explicit_max_items_takes_precedence_over_environment():
-    with warnings.catch_warnings(record=True) as warning_records:
-        warnings.simplefilter("always")
-        value = resolve_batch_progress_max_items(
-            3, environ={BATCH_PROGRESS_MAX_ITEMS_ENV_VAR: "invalid"}
-        )
-
-    assert value == 3
-    assert not warning_records
-
-
-@pytest.mark.parametrize("value", ["invalid", "", "-1"])
-def test_invalid_environment_values_warn_and_use_default(value: str):
-    with pytest.warns(UserWarning, match=BATCH_PROGRESS_MAX_ITEMS_ENV_VAR):
-        result = resolve_batch_progress_max_items(
-            environ={BATCH_PROGRESS_MAX_ITEMS_ENV_VAR: value}
-        )
-
-    assert result == DEFAULT_BATCH_PROGRESS_MAX_ITEMS
-
-
 def test_invalid_explicit_max_items_raise():
     with pytest.raises(ValueError, match="greater than or equal to 0"):
-        resolve_batch_progress_max_items(-1)
+        validate_max_items(-1)
 
     with pytest.raises(TypeError, match="integer"):
-        resolve_batch_progress_max_items(False)
+        validate_max_items(False)
 
     with pytest.raises(ValueError, match="greater than or equal to 0"):
         format_batch_progress(BatchProgressState(), max_items=-1)

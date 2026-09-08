@@ -290,15 +290,6 @@ async def test_default_renderer_uses_limit_and_quiet_setting():
     renderer_type.assert_called_once_with(max_items=4, disable=True)
     renderer.close.assert_called_once_with()
 
-
-def test_helper_reads_progress_limit_from_environment(monkeypatch):
-    monkeypatch.setenv("AGENTS_BATCH_PROGRESS_MAX_ITEMS", "6")
-
-    helper = OpenAIBatchAPIHelper(batch_size=10)
-
-    assert helper.progress_max_items == 6
-
-
 def test_provider_forwards_progress_limit_only_to_default_helper():
     helper = Mock()
     progress = BatchProgressState(finished_counts={"completed": 2})

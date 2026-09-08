@@ -471,7 +471,7 @@ async def test_provider_init_failure_does_not_register_helper():
         ),
         pytest.raises(RuntimeError, match="authentication failed"),
     ):
-        AzureOpenAIBatchProvider("gpt-4o", batch_handler=helper, quiet=True)
+        AzureOpenAIBatchProvider("gpt-4o", batch_handler=helper, progress_max_items=None, quiet=True)
 
     assert helper.task is None
     assert helper.batch_tasks == set()

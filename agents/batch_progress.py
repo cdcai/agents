@@ -6,8 +6,6 @@ Providers are responsible for translating their batch objects into
 tracks those snapshots and renders their current state.
 """
 
-import os
-import warnings
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -18,8 +16,6 @@ from typing import Protocol
 import tqdm.asyncio as tqdm
 
 DEFAULT_BATCH_PROGRESS_MAX_ITEMS = 10
-BATCH_PROGRESS_MAX_ITEMS_ENV_VAR = "AGENTS_BATCH_PROGRESS_MAX_ITEMS"
-
 
 @dataclass(frozen=True)
 class BatchRequestCounts:
@@ -112,12 +108,12 @@ class TqdmBatchProgressRenderer:
 
     def __init__(
         self,
-        max_items: int | None = None,
+        max_items: int,
         *,
         disable: bool = False,
         tqdm_factory: TqdmFactory | None = None,
     ) -> None:
-        self.max_items = resolve_batch_progress_max_items(max_items)
+        self.max_items = validate_max_items(max_items)
         self.disable = disable or self.max_items == 0
         self._tqdm_factory = tqdm.tqdm if tqdm_factory is None else tqdm_factory
         self._rows: list[_TqdmRow] = []
@@ -230,49 +226,13 @@ class BatchTracker:
             finished_counts=dict(sorted(self._finished_counts.items())),
         )
 
-
-def resolve_batch_progress_max_items(
-    max_items: int | None = None,
-    environ: Mapping[str, str] | None = None,
-) -> int:
-    """
-    Resolve the number of individual active batches to display.
-
-    An explicit argument takes precedence over
-    ``AGENTS_BATCH_PROGRESS_MAX_ITEMS``. Invalid environment values issue a
-    warning and use the default, while invalid explicit values raise.
-    """
-
-    if max_items is not None:
-        return _validate_max_items(max_items)
-
-    if environ is None:
-        environ = os.environ
-
-    raw_value = environ.get(BATCH_PROGRESS_MAX_ITEMS_ENV_VAR)
-    if raw_value is None:
-        return DEFAULT_BATCH_PROGRESS_MAX_ITEMS
-
-    try:
-        env_max_items = int(raw_value)
-        return _validate_max_items(env_max_items)
-    except (TypeError, ValueError):
-        warnings.warn(
-            f"Invalid {BATCH_PROGRESS_MAX_ITEMS_ENV_VAR} value {raw_value!r}; "
-            f"using default {DEFAULT_BATCH_PROGRESS_MAX_ITEMS}",
-            UserWarning,
-            stacklevel=2,
-        )
-        return DEFAULT_BATCH_PROGRESS_MAX_ITEMS
-
-
 def format_batch_progress(
     state: BatchProgressState,
     max_items: int = DEFAULT_BATCH_PROGRESS_MAX_ITEMS,
 ) -> str:
     """Format progress as a deterministic, file-tree-style string."""
 
-    max_items = _validate_max_items(max_items)
+    max_items = validate_max_items(max_items)
     if max_items == 0:
         return ""
 
@@ -303,7 +263,7 @@ def format_batch_progress(
     return "\n".join(lines)
 
 
-def _validate_max_items(max_items: int) -> int:
+def validate_max_items(max_items: int) -> int:
     if isinstance(max_items, bool) or not isinstance(max_items, int):
         raise TypeError("max_items must be an integer")
     if max_items < 0:
@@ -337,7 +297,6 @@ def _format_batch(batch: BatchSnapshot) -> str:
 
 
 __all__ = [
-    "BATCH_PROGRESS_MAX_ITEMS_ENV_VAR",
     "DEFAULT_BATCH_PROGRESS_MAX_ITEMS",
     "BatchProgressRenderer",
     "BatchProgressState",
@@ -346,5 +305,5 @@ __all__ = [
     "BatchTracker",
     "TqdmBatchProgressRenderer",
     "format_batch_progress",
-    "resolve_batch_progress_max_items",
+    "validate_max_items"
 ]

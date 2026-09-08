@@ -43,12 +43,13 @@ from pydantic import BaseModel, ValidationError
 
 from ..abstract import _Agent, _BatchAPIHelper, _Provider, _ToolCall
 from ..batch_progress import (
+    DEFAULT_BATCH_PROGRESS_MAX_ITEMS,
     BatchProgressRenderer,
     BatchProgressState,
     BatchSnapshot,
     BatchTracker,
     TqdmBatchProgressRenderer,
-    resolve_batch_progress_max_items,
+    validate_max_items,
 )
 from ..batch_progress import (
     BatchRequestCounts as ProgressRequestCounts,
@@ -120,12 +121,12 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         batch_size: int,
         n_workers: int = 1,
         *,
-        progress_max_items: int | None = None,
+        progress_max_items: int = DEFAULT_BATCH_PROGRESS_MAX_ITEMS,
         progress_renderer: BatchProgressRenderer | None = None,
     ):
         self.batch_size = batch_size
         self.n_workers = n_workers
-        self.progress_max_items = resolve_batch_progress_max_items(progress_max_items)
+        self.progress_max_items = validate_max_items(progress_max_items)
         self.batch_tasks = set()
         self.task = None
         self._closed = False
@@ -640,7 +641,7 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         batch_size: int = DEFAULT_BATCH_SIZE,
         n_workers: int = 1,
         batch_handler: OpenAIBatchAPIHelper | None = None,
-        progress_max_items: int | None = None,
+        progress_max_items: int | None = DEFAULT_BATCH_PROGRESS_MAX_ITEMS,
         quiet: bool = False,
         resource_endpoint: str = "https://cognitiveservices.azure.com/.default",
         **kwargs,
@@ -654,7 +655,7 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         :param int batch_size: The maximum size of batches that should be sent to OpenAI at a time
         :param int n_workers: If `batch_handler` is not provided, the number of workers to run in parallel to process incoming requests (default: 1)
         :param OpenAIBatchAPIHelper batch_handler: (optional) An initialized batch handler which will be used to handle the inqueue of requests to send to openAI
-        :param int progress_max_items: Maximum number of active batches to display individually. Zero disables the display.
+        :param int | None progress_max_items: (default: 10) Maximum number of active batches to display individually. Zero disables the display.
         :param bool quiet: If True, suppresses batch progress output
         :param kwargs: Any keyword arguments to pass to OpenAI class
 
@@ -667,18 +668,19 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         self.batch_out: dict[str, asyncio.Future[ChatCompletion]] = {}
         self.quiet = quiet
 
-        if batch_handler is None:
+        if batch_handler is None and progress_max_items is not None:
             self.batch_handler = OpenAIBatchAPIHelper(
                 batch_size=batch_size,
                 n_workers=n_workers,
                 progress_max_items=progress_max_items,
             )
-        else:
-            if progress_max_items is not None:
-                raise ValueError(
-                    "progress_max_items must be configured on a custom batch_handler."
-                )
+        elif batch_handler is not None and progress_max_items is None:
             self.batch_handler = batch_handler
+        else:
+            # odd case: custom batch handler but progress_max_items is also set
+            raise ValueError(
+                "progress_max_items must be configured on a custom batch_handler."
+            )
 
         super().__init__(model_name, interactive, **kwargs)
 
