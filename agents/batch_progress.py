@@ -17,6 +17,7 @@ import tqdm.asyncio as tqdm
 
 DEFAULT_BATCH_PROGRESS_MAX_ITEMS = 10
 
+
 @dataclass(frozen=True)
 class BatchRequestCounts:
     """Request counts reported for a batch."""
@@ -226,6 +227,7 @@ class BatchTracker:
             finished_counts=dict(sorted(self._finished_counts.items())),
         )
 
+
 def format_batch_progress(
     state: BatchProgressState,
     max_items: int = DEFAULT_BATCH_PROGRESS_MAX_ITEMS,
@@ -305,5 +307,5 @@ __all__ = [
     "BatchTracker",
     "TqdmBatchProgressRenderer",
     "format_batch_progress",
-    "validate_max_items"
+    "validate_max_items",
 ]
