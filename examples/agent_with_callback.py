@@ -3,10 +3,10 @@ Demo of simple Python code production Agent with an Evaluator Agent as a callbac
 Sean Browning
 """
 import asyncio
-import agents
-import logging
+
 import dotenv
-import os
+
+import agents
 
 # NOTE: This loads in env vars for openAI
 dotenv.load_dotenv()

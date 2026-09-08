@@ -2,35 +2,20 @@
 Callbacks for Agents
 """
 
-import abc
+from typing import Any
 
+from .abstract import _Callback
 from .agent import Agent
 
 
-class _Callback(metaclass=abc.ABCMeta):
-    """
-    A Callback virtual class
-    """
-
-    @abc.abstractmethod
-    def __call__(self, cls: Agent, answer: str, scratchpad: str):
-        """
-        Primary method called by agent during callback process
-
-        :param Agent cls: Instantitated class of calling agent for possible modification
-        :param str answer: The final response of the calling Agent
-        :param str scratchpad: The full interaction history of the calling Agent
-
-        """
-        raise NotImplementedError()
-
-
-class AgentCallback(_Callback):
+class AgentCallback[CallbackAgentT: Agent](_Callback[Agent]):
     """
     Call another agent with the answer and scratchpad of a completed agent
     """
 
-    def __init__(self, agent_class: type[Agent], **agent_kwargs):
+    callback_agent: CallbackAgentT
+
+    def __init__(self, agent_class: type[CallbackAgentT], **agent_kwargs: Any) -> None:
         """
         Create an Agent Callback, i.e. an Agent which will be called at the
         end of an Agent run with the answer and scratchpad.
@@ -47,7 +32,7 @@ class AgentCallback(_Callback):
         self.agent_class = agent_class
         self.agent_kwargs = agent_kwargs
 
-    async def __call__(self, cls: Agent, answer: str, scratchpad: str) -> None:
+    async def __call__(self, cls: Agent, answer: Any, scratchpad: str) -> None:
         """
         Run new callback agent on calling agent's answer and scratchpad and append output.
         """

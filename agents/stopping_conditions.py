@@ -2,9 +2,9 @@
 Stopping conditions for language agents
 """
 
-from .abstract import _StoppingCondition
 from pydantic import BaseModel
-from typing import Optional
+
+from .abstract import _StoppingCondition
 
 
 class StoppingCondition(_StoppingCondition):
@@ -17,8 +17,6 @@ class StoppingCondition(_StoppingCondition):
     The main call should always return the final answer, if we've finished the run, or None otherwise
     """
 
-    pass
-
 
 class StopOnStep(_StoppingCondition):
     """
@@ -30,7 +28,7 @@ class StopOnStep(_StoppingCondition):
     def __init__(self, step: int = 1):
         self.step = step
 
-    def __call__(self, cls, response) -> Optional[str]:
+    def __call__(self, cls, response) -> str | None:
         if cls.curr_step >= self.step:
             return response.message.content
         else:
@@ -47,7 +45,7 @@ class StopOnDataModel(_StoppingCondition):
     def __init__(self, answer_cls: type[BaseModel]):
         self.answer_cls = answer_cls
 
-    def __call__(self, cls, response) -> Optional[dict]:
+    def __call__(self, cls, response) -> dict | None:
         if len(cls.tool_res_payload) and isinstance(
             cls.tool_res_payload[-1]["content"], self.answer_cls
         ):
