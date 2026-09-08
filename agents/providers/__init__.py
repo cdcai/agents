@@ -1,3 +1,13 @@
-from .openai import AzureOpenAIBatchProvider, AzureOpenAIProvider, OpenAIProvider
+from .openai import (
+    AzureOpenAIBatchProvider,
+    AzureOpenAIProvider,
+    OpenAIBatchAPIHelper,
+    OpenAIProvider,
+)
 
-__all__ = ["AzureOpenAIBatchProvider", "AzureOpenAIProvider", "OpenAIProvider"]
+__all__ = [
+    "AzureOpenAIBatchProvider",
+    "AzureOpenAIProvider",
+    "OpenAIBatchAPIHelper",
+    "OpenAIProvider",
+]

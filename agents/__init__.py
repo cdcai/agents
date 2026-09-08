@@ -4,6 +4,16 @@ from .agent import (
     PredictionAgentWithJustification,
     StructuredOutputAgent,
 )
+from .batch_progress import (
+    BatchProgressRenderer,
+    BatchProgressState,
+    BatchRequestCounts,
+    BatchSnapshot,
+    BatchTracker,
+    TqdmBatchProgressRenderer,
+    format_batch_progress,
+    validate_max_items,
+)
 from .callbacks import AgentCallback
 from .json_tool_gen import agent_callable, async_agent_callable
 from .processors import (
@@ -24,6 +34,11 @@ __all__ = [
     "AgentCallback",
     "BatchProcessorDF",
     "BatchProcessorIterable",
+    "BatchProgressRenderer",
+    "BatchProgressState",
+    "BatchRequestCounts",
+    "BatchSnapshot",
+    "BatchTracker",
     "PredictionAgent",
     "PredictionAgentWithJustification",
     "ProcessorDF",
@@ -33,6 +48,9 @@ __all__ = [
     "StopOnStep",
     "StoppingCondition",
     "StructuredOutputAgent",
+    "TqdmBatchProgressRenderer",
     "agent_callable",
     "async_agent_callable",
+    "format_batch_progress",
+    "validate_max_items",
 ]

@@ -8,12 +8,14 @@ import logging
 import pydantic
 from dotenv import load_dotenv
 
-import agents.observability as agents
+import agents
 from agents import BatchProcessorIterable, agent_callable
+from agents.providers.openai import AzureOpenAIBatchProvider, AzureOpenAIProvider
 
 load_dotenv()
 
 logging.basicConfig(filename="batch_api.log", filemode="w", level=logging.INFO)
+
 
 # A knock-knock joke return model
 class KnockKnock(pydantic.BaseModel):
@@ -27,6 +29,7 @@ class KnockKnock(pydantic.BaseModel):
 
     def __repr__(self) -> str:
         return f"KnockKnock(setup={self.setup!r}, punchline={self.punchline!r})"
+
 
 # Define an agent
 class KnockKnockAgent(agents.StructuredOutputAgent):
@@ -77,6 +80,7 @@ class KnockKnockAgent(agents.StructuredOutputAgent):
     def plan(self, text: str) -> str:
         return "Good thinking. Now send your joke."
 
+
 class KnockKnockJudge(agents.PredictionAgent):
     """
     The Knock-knock joke contest Judge
@@ -98,22 +102,26 @@ class KnockKnockJudge(agents.PredictionAgent):
             fmt_kwargs = {}
 
         fmt_kwargs.update(
-            {
-                "jokes": "\n".join(
-                    f"Joke {i}:\n{joke}" for i, joke in enumerate(jokes)
-                )
-            }
+            {"jokes": "\n".join(f"Joke {i}:\n{joke}" for i, joke in enumerate(jokes))}
         )
 
         super().__init__(labels=labels, provider=provider, **fmt_kwargs)
 
+
 async def agents_example():
-    async with agents.AzureOpenAIBatchProvider(
-        "gpt-4o-batch", batch_size=5, n_workers=2
+    async with AzureOpenAIBatchProvider(
+        "gpt-4o-batch",
+        batch_size=5,
+        n_workers=2,
+        progress_max_items=10,
     ) as provider:
         # Kind of a hacky way to use this, but just for demonstration purposes
         proc = BatchProcessorIterable(
-            [i for i in range(10)], KnockKnockAgent, batch_size=1, provider=provider, n_retry=1
+            [i for i in range(10)],
+            KnockKnockAgent,
+            batch_size=1,
+            provider=provider,
+            n_retry=1,
         )
 
         jokes = await proc.process()
@@ -131,7 +139,7 @@ async def agents_example():
     judge = KnockKnockJudge(
         [str(KnockKnock.model_validate(joke)) for joke in jokes],
         # Chat provider since it's a single call
-        provider=agents.AzureOpenAIProvider(
+        provider=AzureOpenAIProvider(
             model_name="gpt-4o-nofilter", interactive=False
         ),
     )
@@ -144,6 +152,7 @@ async def agents_example():
     )
 
     print(f"Token usage: {usage}")
+
 
 if __name__ == "__main__":
     asyncio.run(agents_example())
