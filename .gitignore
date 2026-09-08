@@ -49,3 +49,6 @@ MANIFEST
 *.manifest
 *.spec
 .coverage
+
+# Cache
+.mypy_cache

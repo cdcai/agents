@@ -14,15 +14,14 @@ except ImportError:
     # Fix: py3.9
     TypeNone = type(None)  # type: ignore
 
+from collections.abc import Callable
 from typing import (
     Any,
-    TypedDict,
-    Callable,
-    Dict,
-    List,
     Literal,
+    Protocol,
+    TypedDict,
     Union,
-    Optional,
+    cast,
     get_args,
     get_origin,
     get_type_hints,
@@ -33,8 +32,8 @@ PYTHON_TO_OAI_SCHEMA = {
     int: "integer",
     float: "number",
     bool: "boolean",
-    List: "array",
-    Dict: "object",
+    list: "array",
+    dict: "object",
     TypeNone: "null",
 }
 
@@ -46,22 +45,22 @@ ToolParameterType = Literal[
 
 
 class ToolParameterProperties(TypedDict, total=False):
-    type: Union[ToolParameterType, List[ToolParameterType]]
+    type: ToolParameterType | list[ToolParameterType]
     description: str
-    enum: List[Any]
+    enum: list[Any]
     items: "ToolParameterProperties"
 
 
 class ToolParameters(TypedDict):
     type: Literal["object"]
-    properties: Dict[str, ToolParameterProperties]
-    required: List[str]
+    properties: dict[str, ToolParameterProperties]
+    required: list[str]
     additionalProperties: bool
 
 
 class ToolFunction(TypedDict):
     name: str
-    description: Optional[str]
+    description: str | None
     parameters: ToolParameters
     strict: bool
 
@@ -69,6 +68,10 @@ class ToolFunction(TypedDict):
 class ToolDefinition(TypedDict):
     type: Literal["function"]
     function: ToolFunction
+
+
+class _AgentToolPayloadCarrier(Protocol):
+    agent_tool_payload: ToolDefinition
 
 
 def arg_to_oai_type(arg: Any) -> ToolParameterProperties:
@@ -85,17 +88,17 @@ def arg_to_oai_type(arg: Any) -> ToolParameterProperties:
     origin = get_origin(arg)
     args = get_args(arg)
 
-    if origin is list or origin is List:
+    if origin is list or origin is list:
         item_type = arg_to_oai_type(args[0]) if args else {"type": "any"}
         return {"type": "array", "items": item_type}  # type: ignore
-    elif origin is dict or origin is Dict:
+    elif origin is dict or origin is dict:
         return {"type": "object"}
     elif origin is Literal:
         return {"type": "string", "enum": list(args)}
     elif origin is Union:
         # If >1 option, we have to run multiple times and aggregate results
         union_types = [arg_to_oai_type(py_type) for py_type in args]
-        out: Dict[str, Union[List[str], str]] = {}
+        out: dict[str, list[str] | str] = {}
 
         for union_type in union_types:
             for key, value in union_type.items():
@@ -111,13 +114,11 @@ def arg_to_oai_type(arg: Any) -> ToolParameterProperties:
     elif arg in PYTHON_TO_OAI_SCHEMA:
         return {"type": PYTHON_TO_OAI_SCHEMA[arg]}  # type: ignore
     else:
-        raise KeyError(
-            "Type {} is not an interpretable type for OpenAI.".format(str(arg))
-        )
+        raise KeyError(f"Type {arg!s} is not an interpretable type for OpenAI.")
 
 
 def generate_tool_json_payload(
-    func: Callable, description: str, variable_description: Dict[str, str]
+    func: Callable, description: str, variable_description: dict[str, str]
 ) -> ToolDefinition:
     """
     Internal function used to generate OpenAI Function Calling JSON payload from function type hints.
@@ -158,7 +159,7 @@ def generate_tool_json_payload(
             "parameters": {
                 "type": "object",
                 "properties": {},
-                "required": [variable for variable in hints.keys()],
+                "required": [variable for variable in hints],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -169,7 +170,7 @@ def generate_tool_json_payload(
         try:
             arg_properties = arg_to_oai_type(hint)
         except KeyError as e:
-            raise KeyError("Processing arg {} failed. {}".format(arg, str(e)))
+            raise KeyError(f"Processing arg {arg} failed. {e!s}")
         arg_properties["description"] = variable_description[arg]
         tool_json["function"]["parameters"]["properties"].update({arg: arg_properties})
 
@@ -197,7 +198,7 @@ def agent_callable(description: str, variable_description: dict[str, str]):
         json_payload = generate_tool_json_payload(
             func, description, variable_description
         )
-        setattr(wrapper, "agent_tool_payload", json_payload)
+        cast(_AgentToolPayloadCarrier, wrapper).agent_tool_payload = json_payload
 
         return wrapper
 
@@ -225,7 +226,7 @@ def async_agent_callable(description: str, variable_description: dict[str, str])
         json_payload = generate_tool_json_payload(
             func, description, variable_description
         )
-        setattr(wrapper, "agent_tool_payload", json_payload)
+        cast(_AgentToolPayloadCarrier, wrapper).agent_tool_payload = json_payload
 
         return wrapper
 

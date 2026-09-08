@@ -4,20 +4,13 @@ Base observable classes which track token usage and round trips
 
 import logging
 from collections import namedtuple
-from functools import wraps, reduce
+from collections.abc import Awaitable, Callable
+from functools import reduce, wraps
 from typing import (
-    TYPE_CHECKING,
     Any,
-    Awaitable,
-    Callable,
-    Generic,
-    List,
-    Optional,
-    TypeVar,
 )
 
-if TYPE_CHECKING:
-    from openai.types import CompletionUsage
+from openai.types import CompletionUsage
 
 logger = logging.getLogger(__name__)
 
@@ -41,17 +34,13 @@ def sum_llm_usage(x: LLMUsage, y: LLMUsage) -> LLMUsage:
     return LLMUsage(*[i + j for i, j in zip(x, y)])
 
 
-# Types of Completion Usage storing classes that might be seen
-CompletionTypes = TypeVar("CompletionTypes", "CompletionUsage", LLMUsage)
-
-
-class Observable(Generic[CompletionTypes]):
+class Observable[CompletionT: CompletionUsage | LLMUsage]:
     """
     Observability methods and attributes needed for the provider and agent to track
     token and round-trip usage
     """
 
-    all_usage: List[LLMUsage]
+    all_usage: list[LLMUsage]
     round_trips: int
 
     def __init__(self, **kwargs):
@@ -59,12 +48,12 @@ class Observable(Generic[CompletionTypes]):
         self.round_trips = 0
 
     @staticmethod
-    def usage_adapter(usage: Optional[CompletionTypes]) -> LLMUsage:
+    def usage_adapter(usage: CompletionT | None) -> LLMUsage:
         """
         A method which should be extended to adapt usage for provider-specific token usage types
         """
         if not isinstance(usage, LLMUsage):
-            raise ValueError(
+            raise TypeError(
                 f"Observable class could not convert usage of type {type(usage)}"
             )
         return usage
