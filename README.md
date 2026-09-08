@@ -60,8 +60,7 @@ provider = AzureOpenAIBatchProvider(
 )
 ```
 
-If `progress_max_items` is not supplied, `AGENTS_BATCH_PROGRESS_MAX_ITEMS` sets the
-limit. Set either value to `0` to disable the remote batch display. `quiet=True`
+Set either value to `0` to disable the remote batch display. `quiet=True`
 also suppresses it.
 
 The latest immutable state is available as `provider.batch_progress`. Alternate
