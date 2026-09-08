@@ -9,11 +9,11 @@ tracks those snapshots and renders their current state.
 import os
 import warnings
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Mapping, Optional, Protocol, Tuple
+from typing import Protocol
 
 import tqdm.asyncio as tqdm
 
@@ -45,7 +45,7 @@ class BatchSnapshot:
     created_at: datetime
     status: str
     terminal: bool = False
-    request_counts: Optional[BatchRequestCounts] = None
+    request_counts: BatchRequestCounts | None = None
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -60,7 +60,7 @@ class BatchSnapshot:
 class BatchProgressState:
     """An immutable snapshot of all progress currently known to a tracker."""
 
-    active: Tuple[BatchSnapshot, ...] = ()
+    active: tuple[BatchSnapshot, ...] = ()
     finished_counts: Mapping[str, int] = field(
         default_factory=lambda: MappingProxyType({})
     )
@@ -232,8 +232,8 @@ class BatchTracker:
 
 
 def resolve_batch_progress_max_items(
-    max_items: Optional[int] = None,
-    environ: Optional[Mapping[str, str]] = None,
+    max_items: int | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> int:
     """
     Resolve the number of individual active batches to display.
@@ -314,9 +314,9 @@ def _validate_max_items(max_items: int) -> int:
 def _batch_sort_key(batch: BatchSnapshot):
     created_at = batch.created_at
     if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=timezone.utc)
+        created_at = created_at.replace(tzinfo=UTC)
     else:
-        created_at = created_at.astimezone(timezone.utc)
+        created_at = created_at.astimezone(UTC)
 
     return created_at, batch.id
 
@@ -339,8 +339,8 @@ def _format_batch(batch: BatchSnapshot) -> str:
 __all__ = [
     "BATCH_PROGRESS_MAX_ITEMS_ENV_VAR",
     "DEFAULT_BATCH_PROGRESS_MAX_ITEMS",
-    "BatchProgressState",
     "BatchProgressRenderer",
+    "BatchProgressState",
     "BatchRequestCounts",
     "BatchSnapshot",
     "BatchTracker",
