@@ -735,7 +735,12 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
             self.batch_out.pop(task_id, None)
 
     @staticmethod
+    def _serialize_request(task: BatchRequestInput) -> bytes:
+        return (json.dumps(task) + "\n").encode("utf-8")
+        
+    @classmethod
     def _create_batch_file(
+        cls,
         tasks: list[BatchRequestInput],
     ) -> tuple[str, bytes, str]:
         """
@@ -745,15 +750,13 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         :return: Tuple containing the file name, file content, and MIME type to send as an API payload
         """
 
-        with StringIO() as batch_file:
-            for task in tasks:
-                batch_file.write(json.dumps(task) + "\n")
+        batch_file_content = b"".join(cls._serialize_request(task) for task in tasks)
 
-            return (
-                "batch_tasks.jsonl",
-                batch_file.getvalue().encode("utf-8"),
-                "application/json",
-            )
+        return (
+            "batch_tasks.jsonl",
+            batch_file_content,
+            "application/json",
+        )
 
     async def send_batch(
         self,
