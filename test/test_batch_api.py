@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from copy import copy
+from unittest.mock import AsyncMock
 
 import openai
 import pytest
@@ -185,6 +186,7 @@ async def test_batch_api(mocker: MockFixture):
     aoi = openai.AsyncAzureOpenAI()
     aoi.files = AsyncFiles(aoi)
     aoi.batches = AsyncBatches(aoi)
+    close_client = mocker.patch.object(aoi, "close", new_callable=AsyncMock)
 
     mocker.patch.object(AzureOpenAIBatchProvider, "authenticate", return_value=None)
     AzureOpenAIBatchProvider._bearer_token_generator = "lorem ipsum"
@@ -201,3 +203,4 @@ async def test_batch_api(mocker: MockFixture):
         await ag()
 
     assert ag.answer == "Lorem ipsum, dolor sit amet."
+    close_client.assert_awaited_once_with()
