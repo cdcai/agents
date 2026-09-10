@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from openai.types import Batch, FileObject
 
+from agents.providers import openai as openai_provider
 from agents.providers.openai import (
     AzureOpenAIBatchProvider,
     OpenAIBatchAPIHelper,
@@ -81,6 +82,7 @@ def make_queue_provider(queue=None, **kwargs):
         "quiet": True,
         "batch_q": queue if queue is not None else asyncio.Queue(),
         "batch_out": {},
+        "_serialize_request": AzureOpenAIBatchProvider._serialize_request,
     }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
@@ -337,6 +339,71 @@ async def test_close_drains_queued_requests_and_guards_registration():
         assert provider.batch_q.empty()
         assert provider.batch_out == {}
         assert all(future.cancelled() for future in futures.values())
+    finally:
+        await helper.close()
+
+
+@pytest.mark.asyncio
+async def test_batcher_splits_requests_before_jsonl_file_exceeds_limit(
+    monkeypatch,
+):
+    requests = [make_request("task-1"), make_request("task-2")]
+    request_size = len(AzureOpenAIBatchProvider._serialize_request(requests[0]))
+    assert all(
+        len(AzureOpenAIBatchProvider._serialize_request(request)) <= request_size
+        for request in requests
+    )
+    monkeypatch.setattr(openai_provider, "MAX_BATCH_FILE_SIZE", request_size)
+
+    submitted_batches = []
+
+    async def send_batch(batch):
+        submitted_batches.append(batch)
+        return SimpleNamespace(id=f"file-{len(submitted_batches)}", requests=batch)
+
+    async def create_batch_task(batch_file, **_kwargs):
+        return SimpleNamespace(
+            id=f"batch-{batch_file.id}",
+            errors=None,
+            requests=batch_file.requests,
+        )
+
+    async def get_batch_results(batch_task):
+        return [make_result(request["custom_id"]) for request in batch_task.requests]
+
+    provider = make_queue_provider(
+        send_batch=send_batch,
+        create_batch_task=create_batch_task,
+        get_batch_results=get_batch_results,
+    )
+    futures = {
+        request["custom_id"]: asyncio.get_running_loop().create_future()
+        for request in requests
+    }
+    provider.batch_out.update(futures)
+    helper = OpenAIBatchAPIHelper(batch_size=len(requests))
+    helper.timeout = 0.01
+    helper.register_provider(provider)
+
+    try:
+        for request in requests:
+            provider.batch_q.put_nowait(request)
+
+        await asyncio.wait_for(asyncio.gather(*futures.values()), timeout=1)
+
+        submitted_payloads = [
+            AzureOpenAIBatchProvider._create_batch_file(batch)[1]
+            for batch in submitted_batches
+        ]
+        assert all(
+            len(payload) <= openai_provider.MAX_BATCH_FILE_SIZE
+            for payload in submitted_payloads
+        )
+        assert [
+            request["custom_id"]
+            for batch in submitted_batches
+            for request in batch
+        ] == ["task-1", "task-2"]
     finally:
         await helper.close()
 
