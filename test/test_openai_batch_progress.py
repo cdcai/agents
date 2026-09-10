@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime, timezone
+from io import BytesIO
 from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import AsyncMock, Mock, patch
@@ -122,7 +123,9 @@ def make_provider(
 
 async def run_batch_handler(helper: OpenAIBatchAPIHelper) -> None:
     await helper.lock.acquire()
-    await helper._batch_handler([make_request()])
+    batch = BytesIO(AzureOpenAIBatchProvider._serialize_request(make_request()))
+    await helper._batch_handler(batch, ["task-1"])
+    assert batch.closed
 
 
 @pytest.mark.asyncio
