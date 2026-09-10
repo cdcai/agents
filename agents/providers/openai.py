@@ -588,6 +588,7 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
     model_name: str
     interactive: bool
     resource_endpoint: str
+    _credential: ClientSecretCredential | None = None
 
     def __init__(
         self,
@@ -610,15 +611,26 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
         Retrieve Azure OpenAI API key via ClientSecret authentication and
         """
 
-        credential = ClientSecretCredential(
+        self._credential = ClientSecretCredential(
             tenant_id=os.environ["AZURE_TENANT_ID"],
             client_id=os.environ["AZURE_CLIENT_ID"],
             client_secret=os.environ["AZURE_CLIENT_SECRET"],
         )
 
         self._bearer_token_generator = get_bearer_token_provider(
-            credential, self.resource_endpoint
+            self._credential, self.resource_endpoint
         )
+
+    async def close(self) -> None:
+        """Close the OpenAI client and Azure credential transports."""
+        try:
+            await self.llm.close()
+        finally:
+            if self._credential is not None:
+                await self._credential.close()
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        await self.close()
 
     @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3)
     async def prompt_agent(
@@ -772,13 +784,16 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
 
         return self.batch_handler.batch_progress
 
-    async def __aexit__(self, exc_type, exc_value, traceback):
+    async def close(self) -> None:
         """
-        Clean up the batch handler and any ongoing tasks
+        Clean up the batch handler and provider transports.
         """
-        if hasattr(self, "batch_handler") and self.batch_handler is not None:
-            # Cancel the batch processing task
-            await self.batch_handler.close()
+        try:
+            if hasattr(self, "batch_handler") and self.batch_handler is not None:
+                # Cancel the batch processing task before closing its API client.
+                await self.batch_handler.close()
+        finally:
+            await super().close()
 
     async def query_batch_mode(
         self, messages: list[ChatCompletionMessageParam], model: str, **kwargs
