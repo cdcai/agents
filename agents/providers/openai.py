@@ -68,6 +68,7 @@ MAX_BATCH_FILE_SIZE = 200_000_000
 # to save memory
 MIN_SIZE_FOR_OFFLOAD = 8_000_000
 
+
 class RequestTooLargeError(ValueError):
     def __init__(self, custom_id: str, size: int, limit: int) -> None:
         self.custom_id = custom_id
@@ -77,6 +78,8 @@ class RequestTooLargeError(ValueError):
             f"Batch request [{custom_id}] of size {size} bytes "
             f"exceeds the maximum for the OpenAI API ({limit} bytes)."
         )
+
+
 logger = logging.getLogger(__name__)
 
 OPENAI_BATCH_ACTIVE_STATUSES: frozenset[str] = frozenset(
@@ -332,13 +335,11 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         while True:
             # Define our batch and start the clock
             batch_file = SpooledTemporaryFile(  # noqa: SIM115
-                max_size=MIN_SIZE_FOR_OFFLOAD,
-                mode="w+b"
+                max_size=MIN_SIZE_FOR_OFFLOAD, mode="w+b"
             )
             semaphore_acquired = False
             sent = False
             try:
-
                 batch_ids = []
                 batch_file_size = 0
                 # Await new messages to load into the batch
@@ -348,7 +349,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                     timeout = self.timeout if batch_ids else None
                     try:
                         # NOTE: We would possibly end up with a holdout request if that
-                        # request would have made the last batch too large 
+                        # request would have made the last batch too large
                         if holdout_request is not None:
                             req, serialized_req = holdout_request
                             holdout_request = None
@@ -358,10 +359,14 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                             # Try to compute size, or fail the request
                             try:
                                 serialized_req = await asyncio.to_thread(
-                                    self.provider._serialize_request,
-                                    req
+                                    self.provider._serialize_request, req
                                 )
-                            except (TypeError, ValueError, RecursionError, UnicodeError) as err:
+                            except (
+                                TypeError,
+                                ValueError,
+                                RecursionError,
+                                UnicodeError,
+                            ) as err:
                                 self._fail_request(req, err)
                                 continue
                         task_id = req["custom_id"]
@@ -372,7 +377,12 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
 
                     if req_length > MAX_BATCH_FILE_SIZE:
                         # Case: Individual request would be too large, so we should fail that one and move on
-                        self._fail_request(req, RequestTooLargeError(task_id, req_length, MAX_BATCH_FILE_SIZE))
+                        self._fail_request(
+                            req,
+                            RequestTooLargeError(
+                                task_id, req_length, MAX_BATCH_FILE_SIZE
+                            ),
+                        )
                         continue
                     elif (req_length + batch_file_size) > MAX_BATCH_FILE_SIZE:
                         # Case: Batch size would be too big if we added the next request, so we should
@@ -392,7 +402,9 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                 semaphore_acquired = True
 
                 # Send our batch
-                batch_task = asyncio.create_task(self._batch_handler(batch_file, batch_ids))
+                batch_task = asyncio.create_task(
+                    self._batch_handler(batch_file, batch_ids)
+                )
                 self.batch_tasks.add(batch_task)
 
                 sent = True
@@ -846,7 +858,9 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         :return: An OpenAI File object representing the uploaded batch file
         """
         file = await self.llm.files.create(
-            file=("batch_tasks.jsonl", file_content, "application/json"), purpose="batch", **kwargs
+            file=("batch_tasks.jsonl", file_content, "application/json"),
+            purpose="batch",
+            **kwargs,
         )
 
         logger.info(f"Created file [{file.id}]")
