@@ -5,7 +5,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from io import BytesIO, StringIO
+from io import BytesIO
 from typing import (
     Literal,
     TypedDict,
@@ -57,6 +57,20 @@ from ..batch_progress import (
 from ..observability import LLMUsage, Observable
 
 DEFAULT_BATCH_SIZE = 1000
+
+# Maximum size in bytes for the JSONL payload
+# for batch tasks (any larger will raise errors from the API)
+MAX_BATCH_FILE_SIZE = 200_000_000
+
+class RequestTooLargeError(ValueError):
+    def __init__(self, custom_id: str, size: int, limit: int) -> None:
+        self.custom_id = custom_id
+        self.size = size
+        self.limit = limit
+        super().__init__(
+            f"Batch request [{custom_id}] of size {size} bytes "
+            f"exceeds the maximum for the OpenAI API ({limit} bytes)."
+        )
 logger = logging.getLogger(__name__)
 
 OPENAI_BATCH_ACTIVE_STATUSES: frozenset[str] = frozenset(
@@ -308,23 +322,42 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         It's started at init time if we select batch mode, and persists for the duration of the session.
         """
         logger.info("OpenAIBatchHelper opening.")
+        holdout_request = None
         while True:
             try:
                 # Define our batch and start the clock
+                # NOTE: We would possibly end up with a holdout request if that
+                # request would have made the last batch too large 
                 batch = []
-                # Wait until first query comes in
-                req = await self._get_batch_request()
-                batch.append(req)
-
+                batch_file_size = 0
                 # Await new messages to load into the batch
                 # - Until we hit our max batch size, or
                 # - Until we've waited for the time indicated (default 2s)
                 while len(batch) < self.batch_size:
+                    timeout = self.timeout if batch else None
                     try:
-                        req = await self._get_batch_request(timeout=self.timeout)
+                        if holdout_request is not None:
+                            req, req_length = holdout_request
+                            holdout_request = None
+                        else:
+                            req = await self._get_batch_request(timeout=timeout)
+                            req_length = len(self.provider._serialize_request(req))
                     except TimeoutError:
                         break
-                    batch.append(req)
+
+                    if req_length > MAX_BATCH_FILE_SIZE:
+                        # Case: Individual request would be too large, so we should fail that one and move on
+                        self._fail_too_large(req, req_length)
+                        continue
+                    elif (req_length + batch_file_size) > MAX_BATCH_FILE_SIZE:
+                        # Case: Batch size would be too big if we added the next request, so we should
+                        # hold it for the next batch and break
+                        holdout_request = req, req_length
+                        break
+                    else:
+                        # Otherwise: add it to the batch
+                        batch_file_size += req_length
+                        batch.append(req)
 
                 # Wait for semaphore to send off batch task
                 await self.lock.acquire()
@@ -340,6 +373,17 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                 logger.info("OpenAIBatchHelper closing.")
 
                 break
+
+    def _fail_too_large(self, req: BatchRequestInput, size: int):
+        """
+        Handle an edgecase where a single request would be too large to send
+        in which case, we should just fail early rather than trying to send it.
+        """
+        task_id = req["custom_id"]
+        result_future = self.provider.batch_out.get(task_id)
+
+        if result_future is not None and not result_future.done():
+            result_future.set_exception(RequestTooLargeError(task_id, size, MAX_BATCH_FILE_SIZE))
 
     async def _get_batch_request(
         self, timeout: float | None = None
