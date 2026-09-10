@@ -6,7 +6,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from io import BytesIO
+from tempfile import SpooledTemporaryFile
 from typing import (
+    IO,
     Literal,
     TypedDict,
     cast,
@@ -61,6 +63,10 @@ DEFAULT_BATCH_SIZE = 1000
 # Maximum size in bytes for the JSONL payload
 # for batch tasks (any larger will raise errors from the API)
 MAX_BATCH_FILE_SIZE = 200_000_000
+
+# Offload batches larger than this size to disk
+# to save memory
+MIN_SIZE_FOR_OFFLOAD = 8_000_000
 
 class RequestTooLargeError(ValueError):
     def __init__(self, custom_id: str, size: int, limit: int) -> None:
@@ -324,16 +330,22 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         logger.info("OpenAIBatchHelper opening.")
         holdout_request = None
         while True:
+            # Define our batch and start the clock
+            batch_file = SpooledTemporaryFile(
+                max_size=MIN_SIZE_FOR_OFFLOAD,
+                mode="w+b"
+            )
+            semaphore_acquired = False
+            sent = False
             try:
-                # Define our batch and start the clock
-                batch = []
+
                 batch_ids = []
                 batch_file_size = 0
                 # Await new messages to load into the batch
                 # - Until we hit our max batch size, or
                 # - Until we've waited for the time indicated (default 2s)
-                while len(batch) < self.batch_size:
-                    timeout = self.timeout if batch else None
+                while len(batch_ids) < self.batch_size:
+                    timeout = self.timeout if batch_ids else None
                     try:
                         # NOTE: We would possibly end up with a holdout request if that
                         # request would have made the last batch too large 
@@ -370,21 +382,30 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                     else:
                         # Otherwise: add it to the batch
                         batch_file_size += req_length
-                        batch.append(serialized_req)
+                        await asyncio.to_thread(batch_file.write, serialized_req)
                         batch_ids.append(task_id)
+                        del serialized_req
+
+                batch_file.seek(0)
                 # Wait for semaphore to send off batch task
                 await self.lock.acquire()
+                semaphore_acquired = True
 
-                batch_task = asyncio.create_task(self._batch_handler(b"".join(batch), batch_ids))
+                # Send our batch
+                batch_task = asyncio.create_task(self._batch_handler(batch_file, batch_ids))
                 self.batch_tasks.add(batch_task)
-
+                
+                sent = True
                 # Batch task should remove itself from the list once it's done
                 batch_task.add_done_callback(self._batch_handler_callback)
 
             except (asyncio.CancelledError, GeneratorExit):
                 # If the task was cancelled, we should exit the loop
+                if not sent:
+                    batch_file.close()
+                    if semaphore_acquired:
+                        self.lock.release()
                 logger.info("OpenAIBatchHelper closing.")
-
                 break
 
     def _fail_request(self, req: BatchRequestInput, exc: Exception):
@@ -418,7 +439,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         self.provider.batch_q.task_done()
         return request
 
-    async def _batch_handler(self, batch: bytes, batch_ids: list[str]) -> None:
+    async def _batch_handler(self, batch: IO[bytes], batch_ids: list[str]) -> None:
         """
         A handler method that submits the batch of tasks to OpenAI and retrieves the results
         when finished.
@@ -433,7 +454,9 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
 
         # Create batch file, send to OpenAI and execute
         try:
-            batch_file = await self.provider.send_batch(batch)
+            # Close batch file after we're done with it
+            with batch:
+                batch_file = await self.provider.send_batch(batch)
             batch_task = await self.provider.create_batch_task(
                 batch_file,
                 timeout=self.api_timeout,
@@ -796,19 +819,19 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
 
     async def send_batch(
         self,
-        payload: bytes,
+        file_content: IO[bytes],
         **kwargs,
     ) -> FileObject:
         """
         Send a batch file to OpenAI pending further processing.
 
-        :param payload: serialized JSON payload to send to OpenAI
+        :param file_content: serialized JSON payload to send to OpenAI
         :param kwargs: Additional keyword arguments for the file upload (see OpenAI API documentation)
 
         :return: An OpenAI File object representing the uploaded batch file
         """
         file = await self.llm.files.create(
-            file=("batch_tasks.jsonl", payload, "application/json"), purpose="batch", **kwargs
+            file=("batch_tasks.jsonl", file_content, "application/json"), purpose="batch", **kwargs
         )
 
         logger.info(f"Created file [{file.id}]")

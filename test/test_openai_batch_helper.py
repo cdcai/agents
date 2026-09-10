@@ -4,6 +4,7 @@ Test OpenAI Batch API helper lifecycle and result dispatch.
 
 import asyncio
 import json
+from io import BytesIO
 from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import AsyncMock, patch
@@ -15,6 +16,7 @@ from agents.providers import openai as openai_provider
 from agents.providers.openai import (
     AzureOpenAIBatchProvider,
     OpenAIBatchAPIHelper,
+    RequestTooLargeError,
 )
 
 TestBatchStatus = Literal["completed", "in_progress", "cancelling"]
@@ -27,6 +29,15 @@ def make_request(custom_id: str) -> dict:
         "url": "/v1/chat/completions",
         "body": {},
     }
+
+
+def make_batch_input(*custom_ids: str) -> BytesIO:
+    return BytesIO(
+        b"".join(
+            AzureOpenAIBatchProvider._serialize_request(make_request(custom_id))
+            for custom_id in custom_ids
+        )
+    )
 
 
 def make_batch(status: TestBatchStatus = "completed") -> Batch:
@@ -87,6 +98,41 @@ def make_queue_provider(queue=None, **kwargs):
     }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
+
+
+def make_recording_batch_provider():
+    submitted_payloads = []
+    submitted_files = []
+
+    async def send_batch(file_content):
+        submitted_files.append(file_content)
+        assert not file_content.closed
+        payload = file_content.read()
+        submitted_payloads.append(payload)
+        return SimpleNamespace(
+            id=f"file-{len(submitted_payloads)}",
+            payload=payload,
+        )
+
+    async def create_batch_task(batch_file, **_kwargs):
+        return SimpleNamespace(
+            id=f"batch-{batch_file.id}",
+            errors=None,
+            payload=batch_file.payload,
+        )
+
+    async def get_batch_results(batch_task):
+        return [
+            make_result(json.loads(line)["custom_id"])
+            for line in batch_task.payload.splitlines()
+        ]
+
+    provider = make_queue_provider(
+        send_batch=send_batch,
+        create_batch_task=create_batch_task,
+        get_batch_results=get_batch_results,
+    )
+    return provider, submitted_payloads, submitted_files
 
 
 def make_dispatch_helper(results):
@@ -175,7 +221,15 @@ class BlockingLock:
 
 
 @pytest.mark.asyncio
-async def test_close_during_batch_collection_accounts_for_first_request():
+async def test_close_during_batch_collection_accounts_for_first_request(monkeypatch):
+    batch_files = []
+
+    def make_spooled_file(**_kwargs):
+        batch_file = BytesIO()
+        batch_files.append(batch_file)
+        return batch_file
+
+    monkeypatch.setattr(openai_provider, "SpooledTemporaryFile", make_spooled_file)
     queue = NotifyingQueue()
     provider = make_queue_provider(queue)
     future = asyncio.get_running_loop().create_future()
@@ -194,6 +248,7 @@ async def test_close_during_batch_collection_accounts_for_first_request():
         assert helper.task is not None and helper.task.done()
         assert future.cancelled()
         assert provider.batch_out == {}
+        assert batch_files and all(batch_file.closed for batch_file in batch_files)
     finally:
         await helper.close()
 
@@ -356,33 +411,7 @@ async def test_batcher_splits_requests_before_jsonl_file_exceeds_limit(
     )
     monkeypatch.setattr(openai_provider, "MAX_BATCH_FILE_SIZE", request_size)
 
-    submitted_payloads = []
-
-    async def send_batch(payload: bytes):
-        submitted_payloads.append(payload)
-        return SimpleNamespace(
-            id=f"file-{len(submitted_payloads)}",
-            payload=payload,
-        )
-
-    async def create_batch_task(batch_file, **_kwargs):
-        return SimpleNamespace(
-            id=f"batch-{batch_file.id}",
-            errors=None,
-            payload=batch_file.payload,
-        )
-
-    async def get_batch_results(batch_task):
-        return [
-            make_result(json.loads(line)["custom_id"])
-            for line in batch_task.payload.splitlines()
-        ]
-
-    provider = make_queue_provider(
-        send_batch=send_batch,
-        create_batch_task=create_batch_task,
-        get_batch_results=get_batch_results,
-    )
+    provider, submitted_payloads, submitted_files = make_recording_batch_provider()
     futures = {
         request["custom_id"]: asyncio.get_running_loop().create_future()
         for request in requests
@@ -407,6 +436,48 @@ async def test_batcher_splits_requests_before_jsonl_file_exceeds_limit(
             for payload in submitted_payloads
             for line in payload.splitlines()
         ] == ["task-1", "task-2"]
+        assert all(batch_file.closed for batch_file in submitted_files)
+    finally:
+        await helper.close()
+
+
+@pytest.mark.asyncio
+async def test_batcher_rejects_oversized_request_and_processes_next(monkeypatch):
+    valid_request = make_request("task-valid")
+    limit = len(AzureOpenAIBatchProvider._serialize_request(valid_request))
+    oversized_request = make_request("task-oversized")
+    oversized_request["body"] = {"input": "x" * limit}
+    monkeypatch.setattr(openai_provider, "MAX_BATCH_FILE_SIZE", limit)
+
+    provider, submitted_payloads, submitted_files = make_recording_batch_provider()
+    oversized_future = asyncio.get_running_loop().create_future()
+    valid_future = asyncio.get_running_loop().create_future()
+    provider.batch_out.update(
+        {
+            "task-oversized": oversized_future,
+            "task-valid": valid_future,
+        }
+    )
+    helper = OpenAIBatchAPIHelper(batch_size=1)
+    helper.timeout = 0.01
+    helper.register_provider(provider)
+
+    try:
+        provider.batch_q.put_nowait(oversized_request)
+        provider.batch_q.put_nowait(valid_request)
+
+        with pytest.raises(RequestTooLargeError) as exc_info:
+            await oversized_future
+        await asyncio.wait_for(valid_future, timeout=1)
+
+        assert exc_info.value.custom_id == "task-oversized"
+        assert exc_info.value.size > exc_info.value.limit == limit
+        assert [
+            json.loads(line)["custom_id"]
+            for payload in submitted_payloads
+            for line in payload.splitlines()
+        ] == ["task-valid"]
+        assert all(batch_file.closed for batch_file in submitted_files)
     finally:
         await helper.close()
 
@@ -465,16 +536,13 @@ async def test_result_dispatch_skips_abandoned_futures():
     provider.batch_out.update({"task-active": active, "task-cancelled": cancelled})
 
     batch_ids = ["task-active", "task-cancelled", "task-missing"]
-    batch = [make_request(batch_id) for batch_id in batch_ids]
-    serialized_batch = b"".join(AzureOpenAIBatchProvider._serialize_request(b) for b in batch)
+    batch = make_batch_input(*batch_ids)
 
-    await helper._batch_handler(
-        serialized_batch,
-        batch_ids
-    )
+    await helper._batch_handler(batch, batch_ids)
 
     assert active.result().choices[0].message.content == "Active result"
     assert cancelled.cancelled()
+    assert batch.closed
 
 
 @pytest.mark.asyncio
@@ -491,16 +559,13 @@ async def test_malformed_result_does_not_fail_siblings():
     provider.batch_out.update({"task-malformed": malformed, "task-valid": valid})
 
     batch_ids = ["task-malformed", "task-valid"]
-    batch = [make_request("task-malformed"), make_request("task-valid")]
-    serialized_batch = b"".join(AzureOpenAIBatchProvider._serialize_request(b) for b in batch)
+    batch = make_batch_input(*batch_ids)
 
-    await helper._batch_handler(
-        serialized_batch,
-        batch_ids
-    )
+    await helper._batch_handler(batch, batch_ids)
 
     assert malformed.exception() is not None
     assert valid.result().choices[0].message.content == "Valid result"
+    assert batch.closed
 
 
 @pytest.mark.asyncio
@@ -511,17 +576,14 @@ async def test_missing_batch_result_sets_request_exception():
     provider.batch_out.update({"task-returned": returned, "task-missing": missing})
 
     batch_ids = ["task-returned", "task-missing"]
-    batch = [make_request("task-returned"), make_request("task-missing")]
-    serialized_batch = b"".join(AzureOpenAIBatchProvider._serialize_request(b) for b in batch)
-    
-    await helper._batch_handler(
-        serialized_batch,
-        batch_ids
-    )
+    batch = make_batch_input(*batch_ids)
+
+    await helper._batch_handler(batch, batch_ids)
 
     assert returned.result().choices[0].message.content == "Done"
     with pytest.raises(RuntimeError, match="returned no result"):
         await missing
+    assert batch.closed
 
 
 @pytest.mark.asyncio
@@ -531,19 +593,15 @@ async def test_batch_error_propagation_skips_missing_futures():
     provider.send_batch = AsyncMock(side_effect=error)
     active = asyncio.get_running_loop().create_future()
     provider.batch_out["task-active"] = active
+    batch_ids = ["task-missing", "task-active"]
+    batch = make_batch_input(*batch_ids)
 
     with pytest.raises(RuntimeError) as exc_info:
-            batch_ids = ["task-missing", "task-active"]
-            batch = [make_request("task-returned"), make_request("task-missing")]
-            serialized_batch = b"".join(AzureOpenAIBatchProvider._serialize_request(b) for b in batch)
-            
-            await helper._batch_handler(
-                serialized_batch,
-                batch_ids
-            )
+        await helper._batch_handler(batch, batch_ids)
 
     assert exc_info.value is error
     assert active.exception() is error
+    assert batch.closed
 
 
 @pytest.mark.asyncio
