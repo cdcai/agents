@@ -331,7 +331,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         holdout_request = None
         while True:
             # Define our batch and start the clock
-            batch_file = SpooledTemporaryFile(
+            batch_file = SpooledTemporaryFile(  # noqa: SIM115
                 max_size=MIN_SIZE_FOR_OFFLOAD,
                 mode="w+b"
             )
@@ -394,7 +394,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                 # Send our batch
                 batch_task = asyncio.create_task(self._batch_handler(batch_file, batch_ids))
                 self.batch_tasks.add(batch_task)
-                
+
                 sent = True
                 # Batch task should remove itself from the list once it's done
                 batch_task.add_done_callback(self._batch_handler_callback)
