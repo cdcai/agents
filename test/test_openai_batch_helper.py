@@ -195,6 +195,23 @@ class NotifyingQueue(asyncio.Queue):
         return item
 
 
+class CancelConsumerAfterGetQueue(asyncio.Queue):
+    """Cancel the parent consumer immediately after its child get succeeds."""
+
+    def __init__(self):
+        super().__init__()
+        self.consumer = None
+        self.dequeued = None
+
+    async def get(self):
+        request = await super().get()
+        self.dequeued = request
+        if self.consumer is None:
+            raise RuntimeError("consumer must be registered before queue.get() runs")
+        asyncio.get_running_loop().call_soon(self.consumer.cancel)
+        return request
+
+
 class BlockingSemaphore:
     def __init__(self):
         self.acquire_started = asyncio.Event()
@@ -218,6 +235,57 @@ class BlockingLock:
 
     async def __aexit__(self, exc_type, exc_value, traceback):
         pass
+
+
+@pytest.mark.asyncio
+async def test_timeout_after_successful_get_returns_request():
+    """A successful queue.get must win over a simultaneous timeout."""
+    queue = asyncio.Queue()
+    request = make_request("task-timeout-boundary")
+    queue.put_nowait(request)
+    helper = OpenAIBatchAPIHelper(batch_size=2)
+    helper.provider = make_queue_provider(queue)
+
+    async def timeout_after_get(request_task, *, timeout):
+        assert timeout == 2
+        dequeued = await request_task
+        assert dequeued is request
+        raise TimeoutError("forced timeout after successful queue.get()")
+
+    with patch.object(openai_provider.asyncio, "wait_for", timeout_after_get):
+        received = await helper._get_batch_request(timeout=2)
+
+    assert received is request
+    assert queue.empty()
+    await asyncio.wait_for(queue.join(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_successful_get_requeues_request():
+    """Caller cancellation must propagate without losing a dequeued row."""
+    queue = CancelConsumerAfterGetQueue()
+    request = make_request("task-cancellation-boundary")
+    queue.put_nowait(request)
+    helper = OpenAIBatchAPIHelper(batch_size=2)
+    helper.provider = make_queue_provider(queue)
+
+    join_waiter = asyncio.create_task(queue.join())
+    await asyncio.sleep(0)
+    assert not join_waiter.done()
+
+    consumer = asyncio.create_task(helper._get_batch_request(timeout=2))
+    queue.consumer = consumer
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    assert queue.dequeued is request
+    recovered = queue.get_nowait()
+    assert recovered is request
+    await asyncio.sleep(0)
+    assert not join_waiter.done(), "queue.join() completed before requeued work"
+    queue.task_done()
+    await asyncio.wait_for(join_waiter, timeout=1)
 
 
 @pytest.mark.asyncio

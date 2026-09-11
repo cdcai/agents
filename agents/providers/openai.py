@@ -440,11 +440,20 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
                 request = await request_task
             else:
                 request = await asyncio.wait_for(request_task, timeout=timeout)
+        except TimeoutError:
+            if not request_task.done():
+                request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+            if request_task.cancelled() or request_task.exception() is not None:
+                raise
+
+            request = request_task.result()
         except BaseException:
             if not request_task.done():
                 request_task.cancel()
             await asyncio.gather(request_task, return_exceptions=True)
             if not request_task.cancelled() and request_task.exception() is None:
+                self.provider.batch_q.put_nowait(request_task.result())
                 self.provider.batch_q.task_done()
             raise
 

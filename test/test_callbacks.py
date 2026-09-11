@@ -32,3 +32,23 @@ async def test_agent_callback_preserves_spawned_agent_type() -> None:
     assert callback.callback_agent.input_answer == {"result": 42}
     assert callback.callback_agent.input_scratchpad == "work"
     assert calling_agent.callback_output == ["reviewed"]
+
+
+@pytest.mark.asyncio
+async def test_completed_agent_stores_callback_exception() -> None:
+    callback_error = RuntimeError("callback failed")
+
+    async def failing_callback(
+        agent: Agent, *, answer: Any, scratchpad: str
+    ) -> None:
+        raise callback_error
+
+    calling_agent = CallingAgent()
+    calling_agent.CALLBACKS = [failing_callback]
+    calling_agent.answer = "completed answer"
+    calling_agent.scratchpad = "completed work"
+    calling_agent.terminated = True
+
+    await calling_agent.run()
+
+    assert calling_agent.callback_output == [callback_error]
