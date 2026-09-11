@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 import openai
@@ -119,7 +119,21 @@ class Agent(_Agent):
 
         # Evaluate callbacks, if available
         for callback in self.CALLBACKS:
-            await callback(self, answer=self.answer, scratchpad=self.scratchpad)
+            await self._handle_callback(
+                callback, self, answer=self.answer, scratchpad=self.scratchpad
+            )
+
+    async def _handle_callback(
+        self, func: Callable[..., Awaitable[None]], *args, **kwargs
+    ):
+        """
+        Wrapper to handle callback gracefully
+        """
+        try:
+            await func(*args, **kwargs)
+        except Exception as err:
+            logger.exception("Agent encountered an error during callback evaluation")
+            self.callback_output.append(err)
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """
