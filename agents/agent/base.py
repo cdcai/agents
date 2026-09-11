@@ -178,6 +178,7 @@ class Agent(_Agent):
             response = await self.provider.prompt_agent(
                 self, llm_prompt_input, **self.oai_kwargs
             )
+            n_retry -= 1
         if response is None:
             logger.warning("No response after 3 retries, Terminating!")
             self.truncated = True
