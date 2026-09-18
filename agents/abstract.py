@@ -18,6 +18,8 @@ from typing import (
     Union,
 )
 
+from agents.json_tool_gen import Tool
+
 if TYPE_CHECKING:
     from openai.types.chat import ChatCompletionMessageParam
     from openai.types.chat.chat_completion import ChatCompletion, Choice
@@ -250,7 +252,7 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
     BASE_PROMPT: str = ""
     SYSTEM_PROMPT: str = ""
     oai_kwargs: dict[str, Any]
-    TOOLS: list[Any]
+    TOOLS: list[Tool]
     CALLBACKS: list[Callable[..., Any]]
     callback_output: list[Any]
     tool_res_payload: list[dict[str, Any]]
@@ -310,7 +312,7 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
 
     @property
     def _known_tools(self) -> list[str]:
-        return [tool["function"]["name"] for tool in self.TOOLS]
+        return [tool.name for tool in self.TOOLS if tool.is_available]
 
     @property
     def is_truncated(self) -> bool:

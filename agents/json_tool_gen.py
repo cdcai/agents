@@ -7,6 +7,10 @@ Sean Browning
 
 import functools
 import inspect
+from dataclasses import dataclass, field
+from inspect import iscoroutinefunction
+
+from agents.abstract import _Agent
 
 try:
     from types import NoneType as TypeNone
@@ -14,10 +18,11 @@ except ImportError:
     # Fix: py3.9
     TypeNone = type(None)  # type: ignore
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import (
     Any,
     Literal,
+    Optional,
     Protocol,
     TypedDict,
     Union,
@@ -25,6 +30,7 @@ from typing import (
     get_args,
     get_origin,
     get_type_hints,
+    runtime_checkable,
 )
 
 PYTHON_TO_OAI_SCHEMA = {
@@ -43,6 +49,56 @@ ToolParameterType = Literal[
     "string", "integer", "number", "boolean", "array", "null", "object", "any"
 ]
 
+
+@dataclass
+class Tool[AgentT: _Agent]:
+    call : Callable[..., ] | Callable[..., Awaitable]
+    json_payload : Optional["ToolDefinition"]
+    description: str | None
+    variable_description: dict[str, str] | None
+    condition : Callable[[], bool] | None
+    name : str = field(init=False)
+
+    def __post_init__(self):
+        if self.json_payload is None:
+            if isinstance(self.call, _AgentToolPayloadCarrier):
+                # We've already produced the JSON payload, just copy over
+                self.json_payload = self.call.agent_tool_payload
+            else:
+                if self.description is None:
+                    raise TypeError("`description` cannot be None if `json_payload` is None and `call` doesn't have JSON payload!")
+
+                if self.variable_description is None:
+                    raise TypeError("`variable_description` cannot be None if `json_payload` is None and `call` doesn't have JSON payload!")
+
+                # Generate tool payload from call, description, and variable description
+                self.json_payload = generate_tool_json_payload(
+                    self.call,
+                    self.description,
+                    self.variable_description
+                )
+
+        # Just making it easier on myself
+        self.name = self.json_payload["function"]["name"]
+
+        self._agent_hooked = False
+
+    def hook_agent(self, ag: AgentT):
+        self.agent_hook = ag
+        self._agent_hooked = True
+
+    @property
+    def is_available(self) -> bool:
+        """
+        Is the Tool available for use? Evaluated at the start of each step
+        """
+        return self.condition() if self.condition else True
+
+    async def __call__(self, *args: Any, **kwds: Any) -> Any:
+        if iscoroutinefunction(self.call):
+            return await self.call(*args, **kwds)
+        else:
+            return self.call(*args, **kwds)
 
 class ToolParameterProperties(TypedDict, total=False):
     type: ToolParameterType | list[ToolParameterType]
@@ -69,7 +125,7 @@ class ToolDefinition(TypedDict):
     type: Literal["function"]
     function: ToolFunction
 
-
+@runtime_checkable
 class _AgentToolPayloadCarrier(Protocol):
     agent_tool_payload: ToolDefinition
 

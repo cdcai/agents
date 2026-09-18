@@ -7,6 +7,8 @@ import openai
 from openai.types.chat.chat_completion import Choice
 from pydantic import BaseModel
 
+from agents.json_tool_gen import Tool
+
 from ..abstract import Message, _Agent, _Provider, _StoppingCondition
 from ..providers import AzureOpenAIProvider
 from ..stopping_conditions import StopOnDataModel
@@ -48,7 +50,7 @@ class Agent(_Agent):
         stopping_condition: _StoppingCondition,
         model_name: str | None = None,
         provider: _Provider[Any] | None = None,
-        tools: Sequence[Any] | None = None,
+        tools: Sequence[Tool] | None = None,
         callbacks: Sequence[Callable[..., Any]] | None = None,
         oai_kwargs: dict[str, Any] | None = None,
         **fmt_kwargs: Any,
