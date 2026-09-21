@@ -61,23 +61,25 @@ class Tool[AgentT]:
     name: str = field(init=False)
 
     def __post_init__(self):
+
         if self.json_payload is None:
-            if isinstance(self.call, _AgentToolPayloadCarrier):
-                # We've already produced the JSON payload, just copy over
-                self.json_payload = self.call.agent_tool_payload
+            self.json_payload = getattr(self.call, "agent_tool_payload", None)
+
+        if self.condition is None:
+            self.condition = getattr(self.call, "agent_tool_condition", None)
+
+        if self.json_payload is None:
+            if self.description is None:
+                raise TypeError(
+                    "`description` cannot be None if `json_payload` is None "
+                    "and `call` doesn't have a JSON payload"
+                )
+            elif self.variable_description is None:
+                raise TypeError(
+                    "`variable_description` cannot be None if `json_payload` "
+                    "is None and `call` doesn't have a JSON payload"
+                )
             else:
-                if self.description is None:
-                    raise TypeError(
-                        "`description` cannot be None if `json_payload` is None "
-                        "and `call` doesn't have a JSON payload"
-                    )
-
-                if self.variable_description is None:
-                    raise TypeError(
-                        "`variable_description` cannot be None if `json_payload` "
-                        "is None and `call` doesn't have a JSON payload"
-                    )
-
                 # Generate tool payload from call, description, and variable description
                 self.json_payload = generate_tool_json_payload(
                     self.call,
@@ -149,6 +151,7 @@ class ToolDefinition(TypedDict):
 @runtime_checkable
 class _AgentToolPayloadCarrier(Protocol):
     agent_tool_payload: ToolDefinition
+    agent_tool_condition: Callable[[Any], bool] | None
 
 
 def arg_to_oai_type(arg: Any) -> ToolParameterProperties:
@@ -254,7 +257,7 @@ def generate_tool_json_payload(
     return tool_json
 
 
-def agent_callable(description: str, variable_description: dict[str, str]):
+def agent_callable(description: str, variable_description: dict[str, str], condition: Callable[[Any], bool] | None = None):
     """
     Marks a method as accessible to a language agent
     and generates required JSON payload by extracting type hints.
@@ -276,13 +279,13 @@ def agent_callable(description: str, variable_description: dict[str, str]):
             func, description, variable_description
         )
         cast(_AgentToolPayloadCarrier, wrapper).agent_tool_payload = json_payload
-
+        cast(_AgentToolPayloadCarrier, wrapper).agent_tool_condition = condition
         return wrapper
 
     return agent_callable_wrapper
 
 
-def async_agent_callable(description: str, variable_description: dict[str, str]):
+def async_agent_callable(description: str, variable_description: dict[str, str], condition: Callable[[Any], bool] | None = None):
     """
     Marks a coroutine as accessible to a language agent
     and generates required JSON payload by extracting type hints.
@@ -304,7 +307,7 @@ def async_agent_callable(description: str, variable_description: dict[str, str])
             func, description, variable_description
         )
         cast(_AgentToolPayloadCarrier, wrapper).agent_tool_payload = json_payload
-
+        cast(_AgentToolPayloadCarrier, wrapper).agent_tool_condition = condition
         return wrapper
 
     return agent_callable_wrapper
