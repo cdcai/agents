@@ -23,6 +23,29 @@ class DummyAgent(agents.Agent):
         return ""
 
 
+class DummyAgentWithCondition(agents.Agent):
+    @agents.agent_callable(
+        "A tool the language agent can use",
+        variable_description={},
+        condition=lambda agent: agent.curr_step >= 2,
+    )
+    def fizz(self) -> str:
+        """
+        A tool the language agent can use after step 1
+        """
+        return "Congrats."
+
+
+class AsyncDummyAgentWithCondition(agents.Agent):
+    @agents.async_agent_callable(
+        "An asynchronous conditional tool",
+        variable_description={"value": "A value to return"},
+        condition=lambda agent: agent.curr_step >= 2,
+    )
+    async def async_fizz(self, value: str) -> str:
+        return value
+
+
 class AsyncDummyAgent(DummyAgent):
     @agents.async_agent_callable(
         "A function named blech", {"d": "A variable of the letter d"}
@@ -66,6 +89,54 @@ def test_json_payload_from_async_annotations(mocker: MockFixture) -> None:
         "blah",
         "blech",
     }, f"Only found tools:{my_dummy._known_tools}"
+
+
+@pytest.mark.asyncio
+async def test_sync_decorator_condition_controls_availability(
+    mocker: MockFixture,
+) -> None:
+    provider = mocker.Mock(spec=AzureOpenAIProvider)
+    agent = DummyAgentWithCondition(agents.StopNoOp(), provider=provider)
+
+    assert len(agent.TOOLS) == 1
+    assert agent._known_tools == []
+
+    agent.curr_step = 2
+
+    assert agent._known_tools == ["fizz"]
+    assert await agent.TOOLS[0].invoke() == "Congrats."
+
+
+@pytest.mark.asyncio
+async def test_async_decorator_condition_controls_availability(
+    mocker: MockFixture,
+) -> None:
+    provider = mocker.Mock(spec=AzureOpenAIProvider)
+    agent = AsyncDummyAgentWithCondition(agents.StopNoOp(), provider=provider)
+
+    assert len(agent.TOOLS) == 1
+    assert agent._known_tools == []
+
+    agent.curr_step = 2
+
+    assert agent._known_tools == ["async_fizz"]
+    assert await agent.TOOLS[0].invoke(value="available") == "available"
+
+
+def test_explicit_tool_condition_overrides_decorator_condition(
+    mocker: MockFixture,
+) -> None:
+    provider = mocker.Mock(spec=AzureOpenAIProvider)
+    agent = DummyAgentWithCondition(agents.StopNoOp(), provider=provider)
+    decorated_call = agent.TOOLS[0].call
+    tool: agents.Tool[DummyAgentWithCondition] = agents.Tool(
+        call=decorated_call,
+        condition=lambda _agent: True,
+    )
+
+    assert agent.curr_step == 1
+    assert tool.definition == agent.TOOLS[0].definition
+    assert tool.is_available(agent)
 
 
 @pytest.mark.asyncio
