@@ -7,10 +7,9 @@ import asyncio
 import json
 import logging
 import os
-from asyncio import Task, create_task, to_thread
-from collections.abc import Awaitable, Callable, Sequence
+from asyncio import Task, create_task
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from inspect import iscoroutinefunction
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -18,7 +17,7 @@ from typing import (
     Union,
 )
 
-from agents.json_tool_gen import Tool
+from .json_tool_gen import Tool
 
 if TYPE_CHECKING:
     from openai.types.chat import ChatCompletionMessageParam
@@ -55,10 +54,13 @@ class _ToolCall[AgentT: _Agent](metaclass=abc.ABCMeta):
     "The tool call object containing the tool id, name, and args"
     tool_call: Any
 
-    "A callable requested by the agent via the tool_call"
-    func: Callable = field(init=False)
+    "Tools advertised for the step which produced this call"
+    available_tools: Mapping[str, Tool[Any]]
 
-    "Named arguments passed to `func`"
+    "The tool requested by the agent via the tool_call"
+    tool: Tool[Any] = field(init=False)
+
+    "Named arguments passed to the tool"
     kwargs: dict[str, Any] = field(default_factory=dict, init=False)
 
     "Any errors to be returned to the agent (failure to retrieve function or parse args, etc)"
@@ -121,36 +123,41 @@ class _ToolCall[AgentT: _Agent](metaclass=abc.ABCMeta):
             return None
         return self.task.result()
 
-    def _check_and_assign_func(self):
+    def _check_and_assign_tool(self) -> None:
         """
-        A function to check the validity of the function name before retrieving the method.
-
-        We check:
-        - That the requested method is in the agent class
-        - then, we assert that tool is allowed to be called for safety
-
-        if either fail, appends the error for re-prompt in the `errors` attribute, and skip evaluation.
+        Resolve the requested tool from the availability snapshot for this step.
         """
         try:
-            self.func = getattr(self.agent, self.func_name)
-            assert self.func_name in self.agent._known_tools
-        except (AttributeError, AssertionError):
+            self.tool = self.available_tools[self.func_name]
+        except KeyError:
             logger.warning(
                 f"Agent attempted to apply undefined function: {self.func_name}()"
             )
-            self.errors = f"You attempted to apply an undefined function: {self.func_name}, you may only use the following functions as tool calls: {self.agent._known_tools}."
+            known_tools = list(self.available_tools)
+            self.errors = (
+                "You attempted to apply an undefined or unavailable function: "
+                f"{self.func_name}. You may only use the following functions as "
+                f"tool calls: {known_tools}."
+            )
 
     def _check_and_assign_kwargs(self):
         """
         Either assign kwargs for tool call, if JSON payload is able to be decoded, or append error for re-prompt
         """
         try:
-            self.kwargs.update(json.loads(self.arg_str))
-        except json.JSONDecodeError as e:
+            parsed_args = json.loads(self.arg_str)
+            if not isinstance(parsed_args, dict):
+                raise TypeError("tool call arguments must decode to a JSON object")
+            self.kwargs.update(parsed_args)
+        except (json.JSONDecodeError, TypeError) as e:
             logger.warning(
                 f"Tool call {self.func_name} in response couldn't be decoded: {e!s}"
             )
-            self.errors = "The arguments to your previous tool call couldn't be parsed correctly. Please ensure you properly escapse quotes and construct a valid JSON payload."
+            self.errors = (
+                "The arguments to your previous tool call couldn't be parsed "
+                "correctly. Please ensure you properly escape quotes and construct "
+                "a valid JSON object."
+            )
 
     def __call__(self) -> Task[dict[str, str | BaseModel]]:
         """
@@ -172,20 +179,15 @@ class _ToolCall[AgentT: _Agent](metaclass=abc.ABCMeta):
         Returns:
             out (dict[str, str | BaseModel]): A tool call reply payload for the language agent
         """
-        self._check_and_assign_func()
+        self._check_and_assign_tool()
         self._check_and_assign_kwargs()
 
         # If we had a validation error, early return
         if self.errors is not None:
             res = self.errors
         else:
-            if iscoroutinefunction(self.func):
-                call = self.func(**self.kwargs)
-            else:
-                call = to_thread(self.func, **self.kwargs)
-
             try:
-                res = await call
+                res = await self.tool.invoke(**self.kwargs)
             except ValidationError as e:
                 # Case: Handle pydantic validation errors by passing them back to the
                 # model to correct
@@ -252,7 +254,6 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
     BASE_PROMPT: str = ""
     SYSTEM_PROMPT: str = ""
     oai_kwargs: dict[str, Any]
-    TOOLS: list[Tool]
     CALLBACKS: list[Callable[..., Any]]
     callback_output: list[Any]
     tool_res_payload: list[dict[str, Any]]
@@ -270,6 +271,7 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
         **fmt_kwargs: Any,
     ) -> None:
         super().__init__()
+        self.TOOLS: list[Tool[Any]] = []
 
     @abc.abstractmethod
     async def step(self) -> None:
@@ -312,7 +314,11 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
 
     @property
     def _known_tools(self) -> list[str]:
-        return [tool.name for tool in self.TOOLS if tool.is_available]
+        return list(self._get_available_tools())
+
+    def _get_available_tools(self) -> dict[str, Tool[Any]]:
+        """Evaluate tool policies and return the tools available right now."""
+        return {tool.name: tool for tool in self.TOOLS if tool.is_available(self)}
 
     @property
     def is_truncated(self) -> bool:

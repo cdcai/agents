@@ -2,15 +2,15 @@
 Automated generation of function calling JSON payload for OpenAI
 using python type hints and a thin decorator
 
+TODO: make generic and split out eventually
+
 Sean Browning
 """
 
 import functools
 import inspect
+from asyncio import to_thread
 from dataclasses import dataclass, field
-from inspect import iscoroutinefunction
-
-from agents.abstract import _Agent
 
 try:
     from types import NoneType as TypeNone
@@ -18,11 +18,10 @@ except ImportError:
     # Fix: py3.9
     TypeNone = type(None)  # type: ignore
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from typing import (
     Any,
     Literal,
-    Optional,
     Protocol,
     TypedDict,
     Union,
@@ -43,7 +42,7 @@ PYTHON_TO_OAI_SCHEMA = {
     TypeNone: "null",
 }
 
-__all__ = ["agent_callable", "async_agent_callable"]
+__all__ = ["Tool", "agent_callable", "async_agent_callable"]
 
 ToolParameterType = Literal[
     "string", "integer", "number", "boolean", "array", "null", "object", "any"
@@ -51,13 +50,15 @@ ToolParameterType = Literal[
 
 
 @dataclass
-class Tool[AgentT: _Agent]:
-    call : Callable[..., ] | Callable[..., Awaitable]
-    json_payload : Optional["ToolDefinition"]
-    description: str | None
-    variable_description: dict[str, str] | None
-    condition : Callable[[], bool] | None
-    name : str = field(init=False)
+class Tool[AgentT]:
+    """An executable tool, its model-facing definition, and availability policy."""
+
+    call: Callable[..., Any]
+    json_payload: "ToolDefinition | None" = None
+    description: str | None = None
+    variable_description: dict[str, str] | None = None
+    condition: Callable[[AgentT], bool] | None = None
+    name: str = field(init=False)
 
     def __post_init__(self):
         if self.json_payload is None:
@@ -66,39 +67,58 @@ class Tool[AgentT: _Agent]:
                 self.json_payload = self.call.agent_tool_payload
             else:
                 if self.description is None:
-                    raise TypeError("`description` cannot be None if `json_payload` is None and `call` doesn't have JSON payload!")
+                    raise TypeError(
+                        "`description` cannot be None if `json_payload` is None "
+                        "and `call` doesn't have a JSON payload"
+                    )
 
                 if self.variable_description is None:
-                    raise TypeError("`variable_description` cannot be None if `json_payload` is None and `call` doesn't have JSON payload!")
+                    raise TypeError(
+                        "`variable_description` cannot be None if `json_payload` "
+                        "is None and `call` doesn't have a JSON payload"
+                    )
 
                 # Generate tool payload from call, description, and variable description
                 self.json_payload = generate_tool_json_payload(
                     self.call,
                     self.description,
-                    self.variable_description
+                    self.variable_description,
                 )
 
         # Just making it easier on myself
         self.name = self.json_payload["function"]["name"]
 
-        self._agent_hooked = False
+    def is_available(self, agent: AgentT) -> bool:
+        """
+        Return whether the tool is available to ``agent`` for the next step.
 
-    def hook_agent(self, ag: AgentT):
-        self.agent_hook = ag
-        self._agent_hooked = True
+        Agents evaluate this once per step and use that same snapshot for both
+        the model-facing definitions and subsequent call authorization.
+        """
+        return self.condition(agent) if self.condition else True
 
     @property
-    def is_available(self) -> bool:
-        """
-        Is the Tool available for use? Evaluated at the start of each step
-        """
-        return self.condition() if self.condition else True
+    def definition(self) -> "ToolDefinition":
+        """Return the provider-facing tool definition."""
+        # ``__post_init__`` always populates this value.
+        assert self.json_payload is not None
+        return self.json_payload
 
-    async def __call__(self, *args: Any, **kwds: Any) -> Any:
-        if iscoroutinefunction(self.call):
-            return await self.call(*args, **kwds)
-        else:
-            return self.call(*args, **kwds)
+    async def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        """Invoke the tool without blocking the event loop for sync callables."""
+        if inspect.iscoroutinefunction(self.call):
+            return await self.call(*args, **kwargs)
+
+        result = await to_thread(self.call, *args, **kwargs)
+        # Support callable objects and wrappers which return an awaitable but
+        # are not themselves recognized as coroutine functions.
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.invoke(*args, **kwargs)
+
 
 class ToolParameterProperties(TypedDict, total=False):
     type: ToolParameterType | list[ToolParameterType]
@@ -124,6 +144,7 @@ class ToolFunction(TypedDict):
 class ToolDefinition(TypedDict):
     type: Literal["function"]
     function: ToolFunction
+
 
 @runtime_checkable
 class _AgentToolPayloadCarrier(Protocol):
@@ -189,10 +210,10 @@ def generate_tool_json_payload(
     hints = get_type_hints(func)
     hints.pop("return", None)  # Ignore return type
     sig = inspect.signature(func)
-    missing_annotations = (set(sig.parameters.keys()) ^ {"self"}) - set(hints.keys())
-    missing_descriptions = (set(sig.parameters.keys()) ^ {"self"}) - set(
-        variable_description.keys()
-    )
+    parameter_names = set(sig.parameters)
+    parameter_names.discard("self")
+    missing_annotations = parameter_names - set(hints)
+    missing_descriptions = parameter_names - set(variable_description)
 
     if len(missing_annotations) > 0:
         raise ValueError(

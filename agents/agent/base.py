@@ -1,15 +1,14 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any
+from typing import Any, cast
 
 import openai
 from openai.types.chat.chat_completion import Choice
 from pydantic import BaseModel
 
-from agents.json_tool_gen import Tool
-
 from ..abstract import Message, _Agent, _Provider, _StoppingCondition
+from ..json_tool_gen import Tool, ToolDefinition
 from ..providers import AzureOpenAIProvider
 from ..stopping_conditions import StopOnDataModel
 
@@ -29,15 +28,16 @@ class Agent(_Agent):
     :param str BASE_PROMPT: Query prompt which should be populated with `fmt_kwargs` via fstr (and possibly other parameters via :func:`format_prompt`). sent as system message
     :param str SYSTEM_PROMPT: System prompt (persona) sent as first message in chat session
     :param dict oai_kwargs: OpenAI arguments passed as-is to API (temperature, top_p, etc.)
-    :param list TOOLS: List of tools the agent can use. Can be defined in subclass or at runtime. (see: https://platform.openai.com/docs/guides/function-calling)
+    :param list TOOLS: Runtime collection of tools available to the agent. Tools
+        are declared with the constructor or ``@agent_callable`` decorators.
     :param list CALLBACKS: List of callbacks to evaluate at completion. Should be a list of callables with a signature `fun(self, answer, scratchpad)`
     :param _StoppingCondition stopping_condition: The StoppingCondition handler class which will be called after each step to determine if the task is completed.
 
 
     Tool Use
     --------
-    Each added tool must have a corresponding class method that can be invoked during :func:`step()` if the GPT calls it.
-    You should subclass accordingly.
+    Tools may wrap standalone callables or decorated agent methods. Their
+    availability is evaluated at the beginning of each :func:`step()`.
 
     Callback Use
     ------------
@@ -50,7 +50,7 @@ class Agent(_Agent):
         stopping_condition: _StoppingCondition,
         model_name: str | None = None,
         provider: _Provider[Any] | None = None,
-        tools: Sequence[Tool] | None = None,
+        tools: Sequence[Tool[Any] | ToolDefinition] | None = None,
         callbacks: Sequence[Callable[..., Any]] | None = None,
         oai_kwargs: dict[str, Any] | None = None,
         **fmt_kwargs: Any,
@@ -61,7 +61,7 @@ class Agent(_Agent):
         :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task
         :param str model_name: Name of model to use (or deployment name for AzureOpenAI) (optional if provider is passed)
         :param Type[_Provider] provider: Instantiated OpenAI instance to use (optional)
-        :param List[dict] tools: List of tools the agent can call via response (optional)
+        :param tools: Executable tools or legacy definitions backed by agent methods (optional)
         :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
         :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
         :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
@@ -89,14 +89,21 @@ class Agent(_Agent):
         else:
             self.provider = provider
 
-        # Handle Tools
-        self.TOOLS = getattr(self, "TOOLS", [])
+        tool_declaration_class = next(
+            (cls for cls in type(self).__mro__ if "TOOLS" in cls.__dict__), None
+        )
+        if tool_declaration_class is not None:
+            raise TypeError(
+                f"{tool_declaration_class.__name__}.TOOLS is no longer supported; "
+                "pass tools to the agent constructor or use @agent_callable"
+            )
 
-        if tools is not None:
-            self.TOOLS.extend(tools)
+        declared_tools = list(tools) if tools is not None else []
 
         # Add any methods defined with decorator
-        self.TOOLS.extend(self._check_agent_callable_methods())
+        declared_tools.extend(self._check_agent_callable_methods())
+        self.TOOLS = self._normalize_tools(declared_tools)
+        self._active_tools: dict[str, Tool[Any]] = {}
 
         # Handle Callbacks
         self.CALLBACKS = getattr(self, "CALLBACKS", [])
@@ -104,10 +111,7 @@ class Agent(_Agent):
         if callbacks is not None:
             self.CALLBACKS.extend(callbacks)
 
-        self.oai_kwargs = oai_kwargs if oai_kwargs is not None else {}
-
-        if len(self.TOOLS):
-            self.oai_kwargs.update({"tools": self.TOOLS})
+        self.oai_kwargs = dict(oai_kwargs) if oai_kwargs is not None else {}
 
         self.reset()
 
@@ -166,19 +170,29 @@ class Agent(_Agent):
         Handles prompting OpenAI, optionally handling tool calls, and determining whether we've
         finished or run out of tokens.
         """
-        # Pull base query + system messages
-        # (abstract)
+        # Availability is a per-step snapshot. The same registry is used to
+        # advertise and authorize tools, even if a tool mutates agent state.
+        self._active_tools = self._get_available_tools()
+
+        # Pull base query + system messages (abstract).
         llm_prompt_input = self.get_next_messages()
 
         # Send off messages for reply
         self.scratchpad += f"=== Step {self.curr_step} ===========\n"
+
+        request_kwargs = dict(self.oai_kwargs)
+        request_kwargs.pop("tools", None)
+        if self._active_tools:
+            request_kwargs["tools"] = [
+                tool.definition for tool in self._active_tools.values()
+            ]
 
         # Attempt to query GPT and handle invalid JSON parsing of args
         response = None
         n_retry = 3
         while response is None and n_retry > 0:
             response = await self.provider.prompt_agent(
-                self, llm_prompt_input, **self.oai_kwargs
+                self, llm_prompt_input, **request_kwargs
             )
             n_retry -= 1
         if response is None:
@@ -251,7 +265,8 @@ class Agent(_Agent):
         """
         Handle all tool calls in response object
 
-        This gets a method within this class by name and evaluates it with the arguments provided by openai.
+        This resolves an advertised Tool by name and evaluates it with the
+        arguments provided by the model.
 
         The output of that method is appended to a new message in the tool_res_payload list, for downstream querying.
         """
@@ -263,7 +278,7 @@ class Agent(_Agent):
 
         # Run all awaitables
         tool_calls = [
-            self.provider.tool_call_wrapper(self, tool)
+            self.provider.tool_call_wrapper(self, tool, self._active_tools)
             for tool in response.message.tool_calls
         ]
         tool_call_tasks = [tool_call() for tool_call in tool_calls]
@@ -311,6 +326,7 @@ class Agent(_Agent):
         self.curr_step = 1
         self.truncated = False
         self.terminated = False
+        self._active_tools = {}
 
     def dump(self, outfile):
         """
@@ -319,26 +335,64 @@ class Agent(_Agent):
         with open(outfile, "w", encoding="utf-8") as file:
             file.writelines(elem + "\n" for elem in self.scratchpad.split("\n"))
 
-    def _check_agent_callable_methods(self):
+    def _check_agent_callable_methods(self) -> list[Tool[Any]]:
         """
         Scans class for methods that are flagged as agent callable via decorator
         which alleviates some boilerplate for manually defining JSON schema along with method
         """
-        payload = []
+        tools: list[Tool[Any]] = []
         for obj in dir(self):
-            if callable(getattr(self, obj)) and len(
-                getattr(getattr(self, obj), "agent_tool_payload", [])
-            ):
-                payload.append(getattr(self, obj).agent_tool_payload)
+            method = getattr(self, obj)
+            json_payload = getattr(method, "agent_tool_payload", None)
+            if callable(method) and json_payload:
+                tools.append(Tool(call=method, json_payload=json_payload))
 
-        return payload
+        return tools
+
+    def _normalize_tools(
+        self, tools: Sequence[Tool[Any] | ToolDefinition]
+    ) -> list[Tool[Any]]:
+        """Convert supported declarations into one executable representation."""
+        normalized: list[Tool[Any]] = []
+        known_names: set[str] = set()
+
+        for declaration in tools:
+            if isinstance(declaration, Tool):
+                tool = declaration
+            elif isinstance(declaration, dict):
+                try:
+                    name = declaration["function"]["name"]
+                except (KeyError, TypeError) as error:
+                    raise TypeError("Invalid tool definition") from error
+
+                call = getattr(self, name, None)
+                if not callable(call):
+                    raise TypeError(
+                        f"Tool definition {name!r} has no callable agent attribute"
+                    )
+                tool = Tool(
+                    call=call,
+                    json_payload=cast(ToolDefinition, declaration),
+                )
+            else:
+                raise TypeError(
+                    "Tools must be Tool instances or OpenAI-compatible definitions"
+                )
+
+            if tool.name in known_names:
+                raise ValueError(f"Duplicate tool name: {tool.name!r}")
+            known_names.add(tool.name)
+            normalized.append(tool)
+
+        return normalized
 
 
 class StructuredOutputAgent(Agent):
     """
     An Agent with accepts a pydantic BaseModel to use as a tool / validator for model output
 
-    A class method is constructed at runtime along with a stopping condition which triggers when a `response_model` object is detected in the response.
+    An executable tool is constructed at runtime along with a stopping condition
+    which triggers when a `response_model` object is detected in the response.
     """
 
     answer: dict[str, Any]
@@ -350,7 +404,7 @@ class StructuredOutputAgent(Agent):
         model_name: str | None = None,
         stopping_condition: _StoppingCondition | None = None,
         provider: _Provider[Any] | None = None,
-        tools: Sequence[Any] | None = None,
+        tools: Sequence[Tool[Any] | ToolDefinition] | None = None,
         callbacks: Sequence[Callable[..., Any]] | None = None,
         oai_kwargs: dict[str, Any] | None = None,
         **fmt_kwargs: Any,
@@ -358,14 +412,14 @@ class StructuredOutputAgent(Agent):
         """
         Language Agent with structured output
 
-        Handles creating a class method that is used to validate the tool call in the response body at runtime.
+        Handles creating a tool that validates the response body at runtime.
         Also constructs it's own stopping condition which triggers when a `response_model` object is detected in the response (and is parsed correctly).
 
         :param BaseModel response_model: A data model to use for structured output
         :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task
         :param str model_name: Name of model to use (or deployment name for AzureOpenAI) (optional if provider is passed)
         :param Type[_Provider] provider: Instantiated OpenAI instance to use (optional)
-        :param List[dict] tools: List of tools the agent can call via response (optional)
+        :param tools: Executable tools or legacy definitions backed by agent methods (optional)
         :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
         :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
         :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
@@ -387,12 +441,15 @@ class StructuredOutputAgent(Agent):
         oai_tool = openai.pydantic_function_tool(response_model)
 
         # Ensure we don't modify external tools
-        tools_internal = list(tools) if tools is not None else []
-        tools_internal.append(oai_tool)
-
-        # Assign a class method
-        fun_name = oai_tool["function"]["name"]
-        setattr(self, fun_name, self.response_model)
+        tools_internal: list[Tool[Any] | ToolDefinition] = (
+            list(tools) if tools is not None else []
+        )
+        tools_internal.append(
+            Tool(
+                call=self.response_model,
+                json_payload=cast(ToolDefinition, oai_tool),
+            )
+        )
 
         super().__init__(
             stopping_condition=stopping_condition,
@@ -415,3 +472,4 @@ class StructuredOutputAgent(Agent):
         self.curr_step = 1
         self.truncated = False
         self.terminated = False
+        self._active_tools = {}
