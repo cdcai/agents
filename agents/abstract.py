@@ -190,10 +190,10 @@ class _ToolCall[AgentT: _Agent](metaclass=abc.ABCMeta):
         else:
             try:
                 res = await self.tool.invoke(**self.kwargs)
-            except ValidationError as e:
+            except (ValueError, ValidationError) as e:
                 # Case: Handle pydantic validation errors by passing them back to the
                 # model to correct
-                logger.debug("Failed Pydantic Validation.")
+                logger.debug("Tool call failed.", exc_info=True, stack_info=True)
                 res = str(e)
 
         return self._construct_return_message(self.id, res)
