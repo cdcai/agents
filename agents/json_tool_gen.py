@@ -33,6 +33,9 @@ from typing import (
     runtime_checkable,
 )
 
+from openai import pydantic_function_tool
+from pydantic import BaseModel, Field, TypeAdapter, create_model
+
 PYTHON_TO_OAI_SCHEMA = {
     str: "string",
     int: "integer",
@@ -63,6 +66,7 @@ class Tool[AgentT]:
         Callable[[AgentT, "ToolDefinition"], "ToolDefinition"] | None
     ) = None
     name: str = field(init=False)
+    _argument_adapters: dict[str, TypeAdapter[Any]] = field(init=False, repr=False)
 
     def __post_init__(self):
 
@@ -106,6 +110,7 @@ class Tool[AgentT]:
 
         # Just making it easier on myself
         self.name = self.json_payload["function"]["name"]
+        self._argument_adapters = _pydantic_argument_adapters(self.call)
 
     def is_available(self, agent: AgentT) -> bool:
         """
@@ -135,8 +140,23 @@ class Tool[AgentT]:
 
         return ResolvedTool(tool=self, definition=definition)
 
+    def _validate_arguments(
+        self, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        if not self._argument_adapters:
+            return args, kwargs
+
+        bound = inspect.signature(self.call).bind_partial(*args, **kwargs)
+        for name, adapter in self._argument_adapters.items():
+            if name in bound.arguments:
+                bound.arguments[name] = adapter.validate_python(bound.arguments[name])
+
+        return bound.args, bound.kwargs
+
     async def invoke(self, *args: Any, **kwargs: Any) -> Any:
         """Invoke the tool without blocking the event loop for sync callables."""
+        args, kwargs = self._validate_arguments(args, kwargs)
+
         if inspect.iscoroutinefunction(self.call):
             return await self.call(*args, **kwargs)
 
@@ -164,11 +184,7 @@ class ToolParameterProperties(TypedDict, total=False):
     items: "ToolParameterProperties"
 
 
-class ToolParameters(TypedDict):
-    type: Literal["object"]
-    properties: dict[str, ToolParameterProperties]
-    required: list[str]
-    additionalProperties: bool
+ToolParameters = dict[str, Any]
 
 
 class ToolFunction(TypedDict):
@@ -188,6 +204,61 @@ class _AgentToolPayloadCarrier(Protocol):
     agent_tool_payload: ToolDefinition
     agent_tool_condition: Callable[[Any], bool] | None
     agent_definition_factory: Callable[[Any, ToolDefinition], ToolDefinition] | None
+
+
+def _contains_pydantic_model(annotation: Any) -> bool:
+    """Return whether an annotation contains a Pydantic model type."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return True
+    return any(_contains_pydantic_model(arg) for arg in get_args(annotation))
+
+
+def _pydantic_argument_adapters(
+    func: Callable[..., Any],
+) -> dict[str, TypeAdapter[Any]]:
+    """Build validators for callable arguments containing Pydantic models."""
+    try:
+        hints = get_type_hints(func)
+    except (NameError, TypeError):
+        # Explicitly defined tools may use callable objects whose annotations
+        # cannot be inspected. Their existing invocation behavior is unchanged.
+        return {}
+
+    return {
+        name: TypeAdapter(annotation)
+        for name, annotation in hints.items()
+        if name != "return" and _contains_pydantic_model(annotation)
+    }
+
+
+def _generate_pydantic_tool_json_payload(
+    func: Callable[..., Any],
+    description: str,
+    variable_description: dict[str, str],
+    hints: dict[str, Any],
+    signature: inspect.Signature,
+) -> "ToolDefinition":
+    """Generate a strict tool schema from a Pydantic model of all arguments."""
+    model_fields: dict[str, Any] = {}
+    for name, annotation in hints.items():
+        parameter = signature.parameters[name]
+        default = (
+            ... if parameter.default is inspect.Parameter.empty else parameter.default
+        )
+        model_fields[name] = (
+            annotation,
+            Field(default=default, description=variable_description[name]),
+        )
+
+    parameter_model = create_model(f"{func.__name__}Parameters", **model_fields)
+    return cast(
+        ToolDefinition,
+        pydantic_function_tool(
+            parameter_model,
+            name=func.__name__,
+            description=description,
+        ),
+    )
 
 
 def arg_to_oai_type(arg: Any) -> ToolParameterProperties:
@@ -246,12 +317,12 @@ def generate_tool_json_payload(
     Returns:
         Dict[str, Any] A JSON payload to provide in the request body for OpenAI Function Calling
     """
-    hints = get_type_hints(func)
-    hints.pop("return", None)  # Ignore return type
+    all_hints = get_type_hints(func)
+    all_hints.pop("return", None)  # Ignore return type
     sig = inspect.signature(func)
     parameter_names = set(sig.parameters)
     parameter_names.discard("self")
-    missing_annotations = parameter_names - set(hints)
+    missing_annotations = parameter_names - set(all_hints)
     missing_descriptions = parameter_names - set(variable_description)
 
     if len(missing_annotations) > 0:
@@ -265,6 +336,20 @@ def generate_tool_json_payload(
             "agent_callable requires descriptions for every argument! Missing description for {}: {}.".format(
                 func.__name__, ", ".join(missing_descriptions)
             )
+        )
+
+    hints = {
+        name: all_hints[name]
+        for name in sig.parameters
+        if name != "self" and name in all_hints
+    }
+    if any(_contains_pydantic_model(hint) for hint in hints.values()):
+        return _generate_pydantic_tool_json_payload(
+            func,
+            description,
+            variable_description,
+            hints,
+            sig,
         )
 
     tool_json: ToolDefinition = {

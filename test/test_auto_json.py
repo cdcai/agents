@@ -3,6 +3,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import BaseModel, Field, ValidationError
 from pytest_mock import MockFixture
 
 import agents
@@ -60,6 +61,37 @@ class SteppedToolAgent(agents.Agent):
     tool_enabled: bool = False
 
 
+class ToolCoordinates(BaseModel):
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+
+
+class ToolObservation(BaseModel):
+    label: str = Field(min_length=1)
+    coordinates: ToolCoordinates
+
+
+class PydanticArgumentAgent(agents.Agent):
+    observation: ToolObservation | None = None
+    side_effect_called = False
+
+    @agents.agent_callable(
+        "Validate and store an observation",
+        {
+            "observation": "The structured observation to store",
+            "run_side_effect": "Whether to run the follow-up side effect",
+        },
+    )
+    def store_observation(
+        self,
+        observation: ToolObservation,
+        run_side_effect: bool,
+    ) -> str:
+        self.observation = observation
+        self.side_effect_called = run_side_effect
+        return observation.label
+
+
 def test_json_payload_from_annotations(mocker: MockFixture) -> None:
     """
     Testing that decorated methods correctly
@@ -89,6 +121,58 @@ def test_json_payload_from_async_annotations(mocker: MockFixture) -> None:
         "blah",
         "blech",
     }, f"Only found tools:{my_dummy._known_tools}"
+
+
+@pytest.mark.asyncio
+async def test_pydantic_argument_generates_schema_and_validates_input(
+    mocker: MockFixture,
+) -> None:
+    provider = mocker.Mock(spec=AzureOpenAIProvider)
+    agent = PydanticArgumentAgent(agents.StopNoOp(), provider=provider)
+    tool = agent.TOOLS[0]
+
+    function = tool.definition["function"]
+    parameters = function["parameters"]
+    observation_schema = parameters["properties"]["observation"]
+
+    assert function["name"] == "store_observation"
+    assert function["description"] == "Validate and store an observation"
+    assert function["strict"] is True
+    assert observation_schema["description"] == "The structured observation to store"
+    assert observation_schema["type"] == "object"
+    assert observation_schema["properties"]["label"]["minLength"] == 1
+    assert parameters["$defs"]["ToolCoordinates"]["properties"]["latitude"] == {
+        "maximum": 90,
+        "minimum": -90,
+        "title": "Latitude",
+        "type": "number",
+    }
+
+    result = await tool.invoke(
+        observation={
+            "label": "site-a",
+            "coordinates": {"latitude": 33.75, "longitude": -84.39},
+        },
+        run_side_effect=True,
+    )
+
+    assert result == "site-a"
+    assert isinstance(agent.observation, ToolObservation)
+    assert isinstance(agent.observation.coordinates, ToolCoordinates)
+    assert agent.side_effect_called
+
+    agent.observation = None
+    agent.side_effect_called = False
+    with pytest.raises(ValidationError):
+        await tool.invoke(
+            observation={
+                "label": "invalid",
+                "coordinates": {"latitude": 91, "longitude": -84.39},
+            },
+            run_side_effect=False,
+        )
+    assert agent.observation is None
+    assert not agent.side_effect_called
 
 
 @pytest.mark.asyncio
@@ -133,7 +217,7 @@ def test_explicit_tool_condition_cannot_override_decorator_condition(
     # We shouldn't be able to over-ride the decorator, this would introduce
     # another point of failure I don't want to deal with
     with pytest.raises(match="condition cannot be overwritten"):
-        tool: agents.Tool[DummyAgentWithCondition] = agents.Tool(
+        agents.Tool[DummyAgentWithCondition](
             call=decorated_call,
             condition=lambda _agent: True,
         )
