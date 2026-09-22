@@ -8,7 +8,7 @@ from openai.types.chat.chat_completion import Choice
 from pydantic import BaseModel
 
 from ..abstract import Message, _Agent, _Provider, _StoppingCondition
-from ..json_tool_gen import _AgentToolPayloadCarrier, ResolvedTool, Tool, ToolDefinition
+from ..json_tool_gen import ResolvedTool, Tool, ToolDefinition
 from ..providers import AzureOpenAIProvider
 from ..stopping_conditions import StopOnDataModel
 
