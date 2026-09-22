@@ -7,6 +7,7 @@ TODO: make generic and split out eventually
 Sean Browning
 """
 
+import copy
 import functools
 import inspect
 from asyncio import to_thread
@@ -58,17 +59,33 @@ class Tool[AgentT]:
     description: str | None = None
     variable_description: dict[str, str] | None = None
     condition: Callable[[AgentT], bool] | None = None
+    definition_factory: (
+        Callable[[AgentT, "ToolDefinition"], "ToolDefinition"] | None
+    ) = None
     name: str = field(init=False)
 
     def __post_init__(self):
 
-        if self.json_payload is None:
-            self.json_payload = getattr(self.call, "agent_tool_payload", None)
+        if (payload := getattr(self.call, "agent_tool_payload", None)) is not None:
+            self.json_payload = payload
 
-        if self.condition is None:
+            if self.condition is not None:
+                raise TypeError(
+                    "condition cannot be overwritten if call is a decorated function!"
+                )
+
+            if self.definition_factory is not None:
+                raise TypeError(
+                    "definition_factory cannot be overwritten if call is a decorated "
+                    "function!"
+                )
+
             self.condition = getattr(self.call, "agent_tool_condition", None)
+            self.definition_factory = getattr(
+                self.call, "agent_definition_factory", None
+            )
 
-        if self.json_payload is None:
+        elif self.json_payload is None:
             if self.description is None:
                 raise TypeError(
                     "`description` cannot be None if `json_payload` is None "
@@ -106,6 +123,18 @@ class Tool[AgentT]:
         assert self.json_payload is not None
         return self.json_payload
 
+    def resolve_definition(self, agent: AgentT) -> "ResolvedTool[AgentT]":
+        """Resolve a provider-facing definition for the current agent state."""
+        definition = copy.deepcopy(self.definition)
+
+        if self.definition_factory is not None:
+            definition = self.definition_factory(agent, definition)
+
+        if definition["function"]["name"] != self.name:
+            raise ValueError("`definition_factory` cannot alter tool name!")
+
+        return ResolvedTool(tool=self, definition=definition)
+
     async def invoke(self, *args: Any, **kwargs: Any) -> Any:
         """Invoke the tool without blocking the event loop for sync callables."""
         if inspect.iscoroutinefunction(self.call):
@@ -120,6 +149,12 @@ class Tool[AgentT]:
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return await self.invoke(*args, **kwargs)
+
+
+@dataclass(frozen=True)
+class ResolvedTool[AgentT]:
+    tool: Tool[AgentT]
+    definition: "ToolDefinition"
 
 
 class ToolParameterProperties(TypedDict, total=False):
@@ -152,6 +187,7 @@ class ToolDefinition(TypedDict):
 class _AgentToolPayloadCarrier(Protocol):
     agent_tool_payload: ToolDefinition
     agent_tool_condition: Callable[[Any], bool] | None
+    agent_definition_factory: Callable[[Any, ToolDefinition], ToolDefinition] | None
 
 
 def arg_to_oai_type(arg: Any) -> ToolParameterProperties:
@@ -257,7 +293,12 @@ def generate_tool_json_payload(
     return tool_json
 
 
-def agent_callable(description: str, variable_description: dict[str, str], condition: Callable[[Any], bool] | None = None):
+def agent_callable(
+    description: str,
+    variable_description: dict[str, str],
+    condition: Callable[[Any], bool] | None = None,
+    definition_factory: (Callable[[Any, ToolDefinition], ToolDefinition] | None) = None,
+):
     """
     Marks a method as accessible to a language agent
     and generates required JSON payload by extracting type hints.
@@ -265,6 +306,8 @@ def agent_callable(description: str, variable_description: dict[str, str], condi
     Args:
         description (str): A description of the function which will be shared with the language agent
         variable_description (dict[str, str]): A dict with entries for each variable of the function describing what each variable is
+        condition (Callable): An optional callable which determines tool availability for an agent
+        definition_factory (Callable): An optional callable which updates the JSON tool definition at runtime
     """
 
     def agent_callable_wrapper(func: Callable):
@@ -280,12 +323,20 @@ def agent_callable(description: str, variable_description: dict[str, str], condi
         )
         cast(_AgentToolPayloadCarrier, wrapper).agent_tool_payload = json_payload
         cast(_AgentToolPayloadCarrier, wrapper).agent_tool_condition = condition
+        cast(
+            _AgentToolPayloadCarrier, wrapper
+        ).agent_definition_factory = definition_factory
         return wrapper
 
     return agent_callable_wrapper
 
 
-def async_agent_callable(description: str, variable_description: dict[str, str], condition: Callable[[Any], bool] | None = None):
+def async_agent_callable(
+    description: str,
+    variable_description: dict[str, str],
+    condition: Callable[[Any], bool] | None = None,
+    definition_factory: (Callable[[Any, ToolDefinition], ToolDefinition] | None) = None,
+):
     """
     Marks a coroutine as accessible to a language agent
     and generates required JSON payload by extracting type hints.
@@ -293,6 +344,8 @@ def async_agent_callable(description: str, variable_description: dict[str, str],
     Args:
         description (str): A description of the function which will be shared with the language agent
         variable_description (dict[str, str]): A dict with entries for each variable of the function describing what each variable is
+        condition (Callable): An optional callable which determines tool availability for an agent
+        definition_factory (Callable): An optional callable which updates the JSON tool definition at runtime
     """
 
     def agent_callable_wrapper(func: Callable):
@@ -308,6 +361,9 @@ def async_agent_callable(description: str, variable_description: dict[str, str],
         )
         cast(_AgentToolPayloadCarrier, wrapper).agent_tool_payload = json_payload
         cast(_AgentToolPayloadCarrier, wrapper).agent_tool_condition = condition
+        cast(
+            _AgentToolPayloadCarrier, wrapper
+        ).agent_definition_factory = definition_factory
         return wrapper
 
     return agent_callable_wrapper
