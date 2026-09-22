@@ -17,11 +17,13 @@ from typing import (
     Union,
 )
 
-from .json_tool_gen import Tool
+from .json_tool_gen import ResolvedTool
 
 if TYPE_CHECKING:
     from openai.types.chat import ChatCompletionMessageParam
     from openai.types.chat.chat_completion import ChatCompletion, Choice
+
+    from agents import Tool
 
 from pydantic import BaseModel, ValidationError
 
@@ -55,10 +57,10 @@ class _ToolCall[AgentT: _Agent](metaclass=abc.ABCMeta):
     tool_call: Any
 
     "Tools advertised for the step which produced this call"
-    available_tools: Mapping[str, Tool[Any]]
+    available_tools: Mapping[str, ResolvedTool[Any]]
 
     "The tool requested by the agent via the tool_call"
-    tool: Tool[Any] = field(init=False)
+    tool: "Tool[Any]" = field(init=False)
 
     "Named arguments passed to the tool"
     kwargs: dict[str, Any] = field(default_factory=dict, init=False)
@@ -128,7 +130,7 @@ class _ToolCall[AgentT: _Agent](metaclass=abc.ABCMeta):
         Resolve the requested tool from the availability snapshot for this step.
         """
         try:
-            self.tool = self.available_tools[self.func_name]
+            self.tool = self.available_tools[self.func_name].tool
         except KeyError:
             logger.warning(
                 f"Agent attempted to apply undefined function: {self.func_name}()"
@@ -316,9 +318,16 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
     def _known_tools(self) -> list[str]:
         return list(self._get_available_tools())
 
-    def _get_available_tools(self) -> dict[str, Tool[Any]]:
+    def _get_available_tools(self) -> dict[str, "Tool[Any]"]:
         """Evaluate tool policies and return the tools available right now."""
         return {tool.name: tool for tool in self.TOOLS if tool.is_available(self)}
+
+    def _resolved_available_tools(self) -> dict[str, ResolvedTool[Any]]:
+        """Available tools with JSON definition resolved for the current state/step"""
+        return {
+            name: tool.resolve_definition(self)
+            for name, tool in self._get_available_tools().items()
+        }
 
     @property
     def is_truncated(self) -> bool:

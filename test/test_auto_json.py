@@ -123,20 +123,20 @@ async def test_async_decorator_condition_controls_availability(
     assert await agent.TOOLS[0].invoke(value="available") == "available"
 
 
-def test_explicit_tool_condition_overrides_decorator_condition(
+def test_explicit_tool_condition_cannot_override_decorator_condition(
     mocker: MockFixture,
 ) -> None:
     provider = mocker.Mock(spec=AzureOpenAIProvider)
     agent = DummyAgentWithCondition(agents.StopNoOp(), provider=provider)
     decorated_call = agent.TOOLS[0].call
-    tool: agents.Tool[DummyAgentWithCondition] = agents.Tool(
-        call=decorated_call,
-        condition=lambda _agent: True,
-    )
 
-    assert agent.curr_step == 1
-    assert tool.definition == agent.TOOLS[0].definition
-    assert tool.is_available(agent)
+    # We shouldn't be able to over-ride the decorator, this would introduce
+    # another point of failure I don't want to deal with
+    with pytest.raises(match="condition cannot be overwritten"):
+        tool: agents.Tool[DummyAgentWithCondition] = agents.Tool(
+            call=decorated_call,
+            condition=lambda _agent: True,
+        )
 
 
 @pytest.mark.asyncio
@@ -174,7 +174,7 @@ async def test_condition_controls_tool_definitions_for_each_step() -> None:
     first_kwargs = prompt_mock.await_args_list[0].kwargs
     second_kwargs = prompt_mock.await_args_list[1].kwargs
     assert "tools" not in first_kwargs
-    assert second_kwargs["tools"] == [tool.definition]
+    assert second_kwargs["tools"] == [tool.json_payload]
     assert isinstance(second_kwargs["tools"][0], dict)
 
 
@@ -205,7 +205,7 @@ async def test_tool_call_uses_availability_snapshot() -> None:
     )
 
     async def prompt_agent(agent, prompt, **kwargs):
-        assert kwargs["tools"] == [tool.definition]
+        assert kwargs["tools"] == [tool.json_payload]
         agent.tool_enabled = False
         return response
 

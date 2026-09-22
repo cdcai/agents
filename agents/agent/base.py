@@ -8,7 +8,7 @@ from openai.types.chat.chat_completion import Choice
 from pydantic import BaseModel
 
 from ..abstract import Message, _Agent, _Provider, _StoppingCondition
-from ..json_tool_gen import Tool, ToolDefinition
+from ..json_tool_gen import _AgentToolPayloadCarrier, ResolvedTool, Tool, ToolDefinition
 from ..providers import AzureOpenAIProvider
 from ..stopping_conditions import StopOnDataModel
 
@@ -103,7 +103,7 @@ class Agent(_Agent):
         # Add any methods defined with decorator
         declared_tools.extend(self._check_agent_callable_methods())
         self.TOOLS = self._normalize_tools(declared_tools)
-        self._active_tools: dict[str, Tool[Any]] = {}
+        self._active_tools: dict[str, ResolvedTool[Any]] = {}
 
         # Handle Callbacks
         self.CALLBACKS = getattr(self, "CALLBACKS", [])
@@ -172,7 +172,7 @@ class Agent(_Agent):
         """
         # Availability is a per-step snapshot. The same registry is used to
         # advertise and authorize tools, even if a tool mutates agent state.
-        self._active_tools = self._get_available_tools()
+        self._active_tools = self._resolved_available_tools()
 
         # Pull base query + system messages (abstract).
         llm_prompt_input = self.get_next_messages()
@@ -278,7 +278,11 @@ class Agent(_Agent):
 
         # Run all awaitables
         tool_calls = [
-            self.provider.tool_call_wrapper(self, tool, self._active_tools)
+            self.provider.tool_call_wrapper(
+                self,
+                tool,
+                self._active_tools,
+            )
             for tool in response.message.tool_calls
         ]
         tool_call_tasks = [tool_call() for tool_call in tool_calls]
@@ -343,9 +347,9 @@ class Agent(_Agent):
         tools: list[Tool[Any]] = []
         for obj in dir(self):
             method = getattr(self, obj)
-            json_payload = getattr(method, "agent_tool_payload", None)
-            if callable(method) and json_payload:
-                tools.append(Tool(call=method, json_payload=json_payload))
+            if getattr(method, "agent_tool_payload", None) is None:
+                continue
+            tools.append(Tool(call=method))
 
         return tools
 
@@ -372,7 +376,7 @@ class Agent(_Agent):
                     )
                 tool = Tool(
                     call=call,
-                    json_payload=cast(ToolDefinition, declaration),
+                    json_payload=declaration,
                 )
             else:
                 raise TypeError(
