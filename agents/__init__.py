@@ -15,7 +15,7 @@ from .batch_progress import (
     validate_max_items,
 )
 from .callbacks import AgentCallback
-from .json_tool_gen import agent_callable, async_agent_callable
+from .json_tool_gen import Tool, agent_callable, async_agent_callable
 from .processors import (
     BatchProcessorDF,
     BatchProcessorIterable,
@@ -48,6 +48,7 @@ __all__ = [
     "StopOnStep",
     "StoppingCondition",
     "StructuredOutputAgent",
+    "Tool",
     "TqdmBatchProgressRenderer",
     "agent_callable",
     "async_agent_callable",

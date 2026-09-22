@@ -4,12 +4,13 @@ Sean Browning (oet5)
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
 import pydantic
 
 from ..abstract import _Provider, _StoppingCondition
+from ..json_tool_gen import Tool, ToolDefinition
 from .base import StructuredOutputAgent
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class PredictionAgent(StructuredOutputAgent):
         stopping_condition: _StoppingCondition | None = None,
         model_name: str | None = None,
         provider: _Provider | None = None,
-        tools: list[dict] | None = None,
+        tools: Sequence[Tool[Any] | ToolDefinition] | None = None,
         callbacks: list[Callable] | None = None,
         oai_kwargs: dict[str, Any] | None = None,
         **fmt_kwargs,
@@ -46,7 +47,7 @@ class PredictionAgent(StructuredOutputAgent):
         :param _StoppingCondition stopping_condition: A handler that signals when an Agent has completed the task (optional)
         :param str model_name: Name of model to use (or deployment name for AzureOpenAI) (optional if provider is passed)
         :param _Provider provider: Instantiated OpenAI instance to use (optional)
-        :param List[dict] tools: List of tools the agent can call via response (optional)
+        :param tools: Executable tools or legacy definitions backed by agent methods (optional)
         :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
         :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
         :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring

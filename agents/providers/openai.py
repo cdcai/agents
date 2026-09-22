@@ -693,13 +693,9 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
 
         # attempt to parse tool call arguments
         # BUG: OpenAI sometimes doesn't return a "tool_calls" reason and uses "stop" instead. Annoying.
-        if len(ag.TOOLS) and (
+        if out.message.tool_calls and (
             out.finish_reason == "tool_calls"
-            or (
-                out.finish_reason == "stop"
-                and out.message.tool_calls
-                and len(out.message.tool_calls)
-            )
+            or (out.finish_reason == "stop" and len(out.message.tool_calls))
         ):
             # Patch finish_reason if it was actually a tool call but didn't
             # indicate it
