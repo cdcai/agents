@@ -12,6 +12,7 @@ class AgentCallback[CallbackAgentT: Agent](Callback[Agent]):
     """
     Call another agent with the answer and scratchpad of a completed agent
     """
+
     condition = CallbackCondition.ALWAYS
 
     callback_agent: CallbackAgentT

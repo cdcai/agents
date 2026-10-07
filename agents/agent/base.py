@@ -1,7 +1,7 @@
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Sequence
-from typing import Any, cast
+from collections.abc import Sequence
+from typing import Any, Self, cast
 
 import openai
 from openai.types.chat.chat_completion import Choice
@@ -37,7 +37,7 @@ class Agent(_Agent):
     :param dict oai_kwargs: OpenAI arguments passed as-is to API (temperature, top_p, etc.)
     :param list TOOLS: Runtime collection of tools available to the agent. Tools
         are declared with the constructor or ``@agent_callable`` decorators.
-    :param list CALLBACKS: List of callbacks to evaluate at completion. Should be a list of callables with a signature `fun(self, answer, scratchpad)`
+    :param list CALLBACKS: Callbacks with a condition and an async signature `callback(agent, exc)`.
     :param _StoppingCondition stopping_condition: The StoppingCondition handler class which will be called after each step to determine if the task is completed.
 
 
@@ -48,7 +48,8 @@ class Agent(_Agent):
 
     Callback Use
     ------------
-    Each callback will have access to class object, scratchpad, and final answer, thus the signature must match.
+    Each callback receives the calling agent and its run exception, or None on success.
+    Its condition selects whether it runs on success, on error, or both.
     This is still quite experimental, but the intended usecase is for reflection / refinement applications.
     """
 
@@ -58,7 +59,7 @@ class Agent(_Agent):
         model_name: str | None = None,
         provider: _Provider[Any] | None = None,
         tools: Sequence[Tool[Any] | ToolDefinition] | None = None,
-        callbacks: Sequence[Callback["Agent"]] | None = None,
+        callbacks: Sequence[Callback[Self]] | None = None,
         oai_kwargs: dict[str, Any] | None = None,
         **fmt_kwargs: Any,
     ) -> None:
@@ -69,7 +70,7 @@ class Agent(_Agent):
         :param str model_name: Name of model to use (or deployment name for AzureOpenAI) (optional if provider is passed)
         :param Type[_Provider] provider: Instantiated OpenAI instance to use (optional)
         :param tools: Executable tools or legacy definitions backed by agent methods (optional)
-        :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
+        :param callbacks: Callbacks dispatched according to their condition (optional)
         :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
         :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
         """
@@ -136,23 +137,23 @@ class Agent(_Agent):
         else:
             await self._dispatch_callbacks(None)
 
-    async def _dispatch_callbacks(self, exc: Exception | None) -> None:
+    async def _dispatch_callbacks(self: Self, exc: Exception | None) -> None:
         outcome = (
             CallbackCondition.ON_SUCCESS if exc is None else CallbackCondition.ON_ERROR
         )
 
         for callback in self.CALLBACKS:
             if callback.condition in (CallbackCondition.ALWAYS, outcome):
-                await self._handle_callback(callback, self, exc)
+                await self._handle_callback(callback, exc)
 
     async def _handle_callback(
-        self, func: Callable[..., Awaitable[None]], *args, **kwargs
-    ):
+        self, func: Callback[Self], exc: Exception | None
+    ) -> None:
         """
         Wrapper to handle callback gracefully
         """
         try:
-            await func(*args, **kwargs)
+            await func(self, exc)
         except Exception as err:
             logger.exception("Agent encountered an error during callback evaluation")
             # TODO: This output needs to be more traceable/indexable than a list
@@ -426,7 +427,7 @@ class StructuredOutputAgent(Agent):
         stopping_condition: _StoppingCondition | None = None,
         provider: _Provider[Any] | None = None,
         tools: Sequence[Tool[Any] | ToolDefinition] | None = None,
-        callbacks: Sequence[Callable[..., Any]] | None = None,
+        callbacks: Sequence[Callback[Self]] | None = None,
         oai_kwargs: dict[str, Any] | None = None,
         **fmt_kwargs: Any,
     ) -> None:
@@ -441,7 +442,7 @@ class StructuredOutputAgent(Agent):
         :param str model_name: Name of model to use (or deployment name for AzureOpenAI) (optional if provider is passed)
         :param Type[_Provider] provider: Instantiated OpenAI instance to use (optional)
         :param tools: Executable tools or legacy definitions backed by agent methods (optional)
-        :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
+        :param callbacks: Callbacks dispatched according to their condition (optional)
         :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
         :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
 
