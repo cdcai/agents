@@ -10,10 +10,13 @@ import os
 from asyncio import Task, create_task
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    Protocol,
+    Self,
     Union,
 )
 
@@ -256,7 +259,7 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
     BASE_PROMPT: str = ""
     SYSTEM_PROMPT: str = ""
     oai_kwargs: dict[str, Any]
-    CALLBACKS: list[Callable[..., Any]]
+    CALLBACKS: list["Callback[Self]"]
     callback_output: list[Any]
     tool_res_payload: list[dict[str, Any]]
     provider: _Provider[Any]
@@ -268,7 +271,7 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
         model_name: str | None = None,
         provider: _Provider[Any] | None = None,
         tools: Sequence[Any] | None = None,
-        callbacks: Sequence[Callable[..., Any]] | None = None,
+        callbacks: Sequence["Callback[Self]"] | None = None,
         oai_kwargs: dict[str, Any] | None = None,
         **fmt_kwargs: Any,
     ) -> None:
@@ -370,19 +373,29 @@ class _BatchAPIHelper[ProviderT: _Provider[Any]](metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
 
-class _Callback[CallingAgentT: _Agent](metaclass=abc.ABCMeta):
+class CallbackCondition(StrEnum):
+    """
+    Conditions under which a callback is dispatched.
+    """
+
+    ALWAYS = "always"
+    ON_SUCCESS = "on_success"
+    ON_ERROR = "on_error"
+
+
+class Callback[CallingAgentT: _Agent](Protocol):
     """
     A Callback virtual class
     """
 
-    @abc.abstractmethod
-    async def __call__(self, cls: CallingAgentT, answer: Any, scratchpad: str) -> None:
+    condition: CallbackCondition = CallbackCondition.ALWAYS
+
+    async def __call__(self, cls: CallingAgentT, exc: Exception | None) -> None:
         """
         Primary method called by agent during callback process
 
         :param Agent cls: Instantitated class of calling agent for possible modification
-        :param answer: The final response of the calling Agent
-        :param str scratchpad: The full interaction history of the calling Agent
+        :param exc: An exception raised during runtime of the agent, if present
 
         """
-        raise NotImplementedError()
+        ...
