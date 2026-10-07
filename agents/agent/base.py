@@ -7,7 +7,14 @@ import openai
 from openai.types.chat.chat_completion import Choice
 from pydantic import BaseModel
 
-from ..abstract import Message, _Agent, _Provider, _StoppingCondition
+from ..abstract import (
+    Callback,
+    CallbackCondition,
+    Message,
+    _Agent,
+    _Provider,
+    _StoppingCondition,
+)
 from ..json_tool_gen import ResolvedTool, Tool, ToolDefinition
 from ..providers import AzureOpenAIProvider
 from ..stopping_conditions import StopOnDataModel
@@ -51,7 +58,7 @@ class Agent(_Agent):
         model_name: str | None = None,
         provider: _Provider[Any] | None = None,
         tools: Sequence[Tool[Any] | ToolDefinition] | None = None,
-        callbacks: Sequence[Callable[..., Any]] | None = None,
+        callbacks: Sequence[Callback["Agent"]] | None = None,
         oai_kwargs: dict[str, Any] | None = None,
         **fmt_kwargs: Any,
     ) -> None:
@@ -119,15 +126,24 @@ class Agent(_Agent):
         if reset:
             self.reset()
 
-        while not (self.is_terminated or self.is_truncated):
-            logger.debug(f"Running step {self.curr_step}.")
-            await self.step()
+        try:
+            while not (self.is_terminated or self.is_truncated):
+                logger.debug(f"Running step {self.curr_step}.")
+                await self.step()
+        except Exception as err:
+            await self._dispatch_callbacks(err)
+            raise
+        else:
+            await self._dispatch_callbacks(None)
 
-        # Evaluate callbacks, if available
+    async def _dispatch_callbacks(self, exc: Exception | None) -> None:
+        outcome = (
+            CallbackCondition.ON_SUCCESS if exc is None else CallbackCondition.ON_ERROR
+        )
+
         for callback in self.CALLBACKS:
-            await self._handle_callback(
-                callback, self, answer=self.answer, scratchpad=self.scratchpad
-            )
+            if callback.condition in (CallbackCondition.ALWAYS, outcome):
+                await self._handle_callback(callback, self, exc)
 
     async def _handle_callback(
         self, func: Callable[..., Awaitable[None]], *args, **kwargs
@@ -139,6 +155,7 @@ class Agent(_Agent):
             await func(*args, **kwargs)
         except Exception as err:
             logger.exception("Agent encountered an error during callback evaluation")
+            # TODO: This output needs to be more traceable/indexable than a list
             self.callback_output.append(err)
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:

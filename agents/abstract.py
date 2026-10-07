@@ -1,6 +1,7 @@
 """
 All abstract classes
 """
+from enum import StrEnum
 
 import abc
 import asyncio
@@ -14,7 +15,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
-    Union,
+    Union, Protocol,
 )
 
 from .json_tool_gen import ResolvedTool
@@ -256,7 +257,7 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
     BASE_PROMPT: str = ""
     SYSTEM_PROMPT: str = ""
     oai_kwargs: dict[str, Any]
-    CALLBACKS: list[Callable[..., Any]]
+    CALLBACKS: list["Callback[_Agent]"]
     callback_output: list[Any]
     tool_res_payload: list[dict[str, Any]]
     provider: _Provider[Any]
@@ -370,19 +371,26 @@ class _BatchAPIHelper[ProviderT: _Provider[Any]](metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
 
-class _Callback[CallingAgentT: _Agent](metaclass=abc.ABCMeta):
+class CallbackCondition(StrEnum):
+    """
+    Conditions where a 
+    """
+    ALWAYS = "always"
+    ON_SUCCESS = "on_success"
+    ON_ERROR = "on_error"
+
+class Callback[CallingAgentT: _Agent](Protocol):
     """
     A Callback virtual class
     """
+    condition : CallbackCondition = CallbackCondition.ALWAYS
 
-    @abc.abstractmethod
-    async def __call__(self, cls: CallingAgentT, answer: Any, scratchpad: str) -> None:
+    async def __call__(self, cls: CallingAgentT, exc: Exception | None) -> None:
         """
         Primary method called by agent during callback process
 
         :param Agent cls: Instantitated class of calling agent for possible modification
-        :param answer: The final response of the calling Agent
-        :param str scratchpad: The full interaction history of the calling Agent
+        :param exc: An exception raised during runtime of the agent, if present
 
         """
-        raise NotImplementedError()
+        ...

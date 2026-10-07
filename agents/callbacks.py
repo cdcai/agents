@@ -4,14 +4,15 @@ Callbacks for Agents
 
 from typing import Any
 
-from .abstract import _Callback
+from .abstract import Callback, CallbackCondition
 from .agent import Agent
 
 
-class AgentCallback[CallbackAgentT: Agent](_Callback[Agent]):
+class AgentCallback[CallbackAgentT: Agent](Callback[Agent]):
     """
     Call another agent with the answer and scratchpad of a completed agent
     """
+    condition = CallbackCondition.ALWAYS
 
     callback_agent: CallbackAgentT
 
@@ -32,13 +33,13 @@ class AgentCallback[CallbackAgentT: Agent](_Callback[Agent]):
         self.agent_class = agent_class
         self.agent_kwargs = agent_kwargs
 
-    async def __call__(self, cls: Agent, answer: Any, scratchpad: str) -> None:
+    async def __call__(self, cls: Agent, exc: Exception | None) -> None:
         """
         Run new callback agent on calling agent's answer and scratchpad and append output.
         """
 
         self.callback_agent = self.agent_class(
-            **self.agent_kwargs, answer=answer, scratchpad=scratchpad
+            **self.agent_kwargs, answer=cls.answer, scratchpad=cls.scratchpad
         )
         await self.callback_agent.run()
         cls.callback_output.append(self.callback_agent.answer)
