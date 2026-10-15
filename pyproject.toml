@@ -28,6 +28,7 @@ test = [
     "pytest",
     "pytest-asyncio",
     "pytest-mock",
+    "httpx"
 ]
 
 dev = [
