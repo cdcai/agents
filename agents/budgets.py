@@ -151,7 +151,7 @@ def resolve_request_budget(
 @lru_cache(maxsize=8)
 def _encoding(name: str):
     try:
-        import tiktoken
+        import tiktoken  # type: ignore[import-not-found]
 
         return tiktoken.get_encoding(name)
     except Exception:  # noqa: BLE001 - optional third-party tokenizer/cache failures

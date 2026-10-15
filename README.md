@@ -125,6 +125,43 @@ provider's `batch_polling_deadline`, and operation retry limits are separate
 settings. A local deadline cannot prove remote execution stopped; an immediate
 retry can duplicate remote work.
 
+### Batch failures and retry ownership
+
+The batch provider reads both output and error files, correlates rows by
+`custom_id`, and retains successful responses even when siblings fail or the
+batch expires. Nested Azure errors retain their original row in `error.details`;
+the normalized error exposes `code`, `custom_id`, `batch_id`, and `status_code`.
+Duplicate IDs, malformed responses, and missing rows produce terminal
+`BatchProtocolError` for the affected request. Completed all-error batches are
+valid batch responses and propagate their individual errors.
+
+Pass `retry_policy=RetryPolicy(max_attempts=3, elapsed_time_budget=120)` from
+`agents.retries` to configure bounded retries of failed operations. Context
+overflow and invalid requests are terminal for unchanged inputs. Timeouts,
+rate limits, and service failures can retry the individual model request or
+file operation without replaying prior steps or callbacks. Batch creation is
+attempted once because losing its response can leave remote work running. SDK
+retries default to zero; retain that setting to keep a single retry budget.
+
+Processors retain every spawned agent in input order, including during
+cancellation, and expose terminal errors as `processor.failures[index]` and
+`agent.last_error`. `n_retry` counts total allowed agent attempts, including the
+initial attempt. Only an explicit application
+`RetryableAgentError(..., operation_scoped=False)` permits continuation at the
+agent level; provider failures are already handled at the operation level and
+are never multiplied by processor retries. Untyped application errors terminate
+the agent. Partial failures still produce compatibility placeholders; applications
+must reconcile `failures` before declaring their workload successful.
+
+Set `request_budget=budget` to enable preflight or
+`require_request_budget=True` to use the configurable fallback cutoff. Legacy
+providers without either option do not enforce a cutoff. A report deadline
+abandons only its own future. A `batch_polling_deadline` is owned by the helper
+for the entire submitted batch: it requests remote cancellation, preserves
+available results, and reports `BatchPollingDeadlineExceeded` for unresolved
+requests. Cancellation remains best effort and does not guarantee remote work
+has stopped.
+
 ## Public Domain and CC0 Notice
 
 This repository constitutes a work of the United States Government and is not

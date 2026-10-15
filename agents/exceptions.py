@@ -12,10 +12,15 @@ class AgentError(RuntimeError):
 
     retryable = False
     operation_scoped = True
+    remote_outcome_unknown = False
 
     def __init__(
-        self, message: str, *, code: str | None = None,
-        details: Any = None, operation_scoped: bool = True,
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        details: Any = None,
+        operation_scoped: bool = True,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -37,9 +42,14 @@ class BatchRequestError(AgentError):
     """A single request failure, preserving the original provider payload."""
 
     def __init__(
-        self, message: str, *, custom_id: str | None = None,
-        batch_id: str | None = None, status_code: int | None = None,
-        code: str | None = None, details: Any = None,
+        self,
+        message: str,
+        *,
+        custom_id: str | None = None,
+        batch_id: str | None = None,
+        status_code: int | None = None,
+        code: str | None = None,
+        details: Any = None,
         remote_outcome_unknown: bool = False,
     ) -> None:
         super().__init__(message, code=code, details=details)
@@ -73,8 +83,11 @@ class BatchPollingDeadlineExceeded(TerminalAgentError):
             f"Batch [{batch.id}] exceeded its {seconds:g}s local polling deadline; "
             "the remote request may still complete.",
             code="batch_polling_deadline_exceeded",
-            details={"batch_id": batch.id, "seconds": seconds,
-                     "remote_outcome_unknown": True},
+            details={
+                "batch_id": batch.id,
+                "seconds": seconds,
+                "remote_outcome_unknown": True,
+            },
         )
         self.batch = batch
         self.batch_id = batch.id

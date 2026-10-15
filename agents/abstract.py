@@ -264,6 +264,9 @@ class _Agent(Observable, metaclass=abc.ABCMeta):
     tool_res_payload: list[dict[str, Any]]
     provider: _Provider[Any]
     placeholder: Any | None
+    last_error: Exception | None = None
+    last_request_estimate: Any = None
+    last_request_usage: dict[str, Any] | None = None
 
     def __init__(
         self,

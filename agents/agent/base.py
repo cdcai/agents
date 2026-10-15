@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 class Agent(_Agent):
     """
+
     Base Class for language agents, which can be initialized directly or subclassed depending on use case.
 
     :param bool terminated: Whether agent has completed it's run (use :func:`reset`, to reset)
@@ -59,6 +60,9 @@ class Agent(_Agent):
     Its condition selects whether it runs on success, on error, or both.
     This is still quite experimental, but the intended usecase is for reflection / refinement applications.
     """
+
+    request_history: list[dict[str, Any]]
+    execution_deadline: ExecutionDeadline | None
 
     def __init__(
         self,
@@ -155,12 +159,14 @@ class Agent(_Agent):
                         await self.step()
             except TimeoutError as error:
                 if timeout.expired():
-                    raise ExecutionDeadlineExceeded(budget) from error
+                    raise ExecutionDeadlineExceeded(cast(float, budget)) from error
                 raise
         except Exception as err:
+            self.last_error = err
             await self._dispatch_callbacks(err)
             raise
         else:
+            self.last_error = None
             await self._dispatch_callbacks(None)
 
     async def rebuild_context(
@@ -398,8 +404,9 @@ class Agent(_Agent):
         self.truncated = False
         self.terminated = False
         self._active_tools = {}
-        self.request_history: list[dict[str, Any]] = []
-        self.execution_deadline: ExecutionDeadline | None = None
+        self.request_history = []
+        self.execution_deadline = None
+        self.last_error = None
 
     def dump(self, outfile):
         """

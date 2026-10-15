@@ -1,18 +1,19 @@
 """Bounded retries at the failed operation, never around callbacks or agents."""
 
 import asyncio
+import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from time import monotonic
-from typing import TypeVar
 
 import openai
 
 from .exceptions import (
-    AgentError, ContextLengthExceededError, RetryableAgentError, TerminalAgentError,
+    AgentError,
+    ContextLengthExceededError,
+    RetryableAgentError,
+    TerminalAgentError,
 )
-
-T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -25,9 +26,19 @@ class RetryPolicy:
     elapsed_time_budget: float | None = None
 
     def __post_init__(self) -> None:
-        if self.max_attempts < 1 or self.initial_delay < 0 or self.max_delay < 0:
+        if (
+            isinstance(self.max_attempts, bool)
+            or not isinstance(self.max_attempts, int)
+            or self.max_attempts < 1
+            or not math.isfinite(self.initial_delay)
+            or not math.isfinite(self.max_delay)
+            or self.initial_delay < 0
+            or self.max_delay < 0
+        ):
             raise ValueError("Retry attempts must be positive and delays nonnegative")
-        if self.elapsed_time_budget is not None and self.elapsed_time_budget <= 0:
+        if self.elapsed_time_budget is not None and (
+            not math.isfinite(self.elapsed_time_budget) or self.elapsed_time_budget <= 0
+        ):
             raise ValueError("Retry elapsed_time_budget must be positive")
 
 
@@ -46,7 +57,11 @@ def normalize_exception(exc: Exception) -> Exception:
             return ContextLengthExceededError(str(exc), code=code, details=body)
         status = getattr(exc, "status_code", None)
         transient = isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError))
-        transient = transient or status in (408, 409, 429) or (status is not None and status >= 500)
+        transient = (
+            transient
+            or status in (408, 409, 429)
+            or (status is not None and status >= 500)
+        )
         error_class = RetryableAgentError if transient else TerminalAgentError
         error = error_class(str(exc), code=code, details=body)
         error.remote_outcome_unknown = isinstance(exc, openai.APIConnectionError)
@@ -61,8 +76,10 @@ def is_retryable_exception(exc: Exception, *, agent_scope: bool = False) -> bool
     )
 
 
-async def retry_operation(
-    operation: Callable[[], Awaitable[T]], policy: RetryPolicy, *,
+async def retry_operation[T](
+    operation: Callable[[], Awaitable[T]],
+    policy: RetryPolicy,
+    *,
     retry: bool = True,
 ) -> T:
     """Repeat only known transient failures; cancellation always propagates.
@@ -77,26 +94,39 @@ async def retry_operation(
                 return await operation()
             remaining = policy.elapsed_time_budget - (monotonic() - started)
             if remaining <= 0:
-                raise TerminalAgentError("Operation retry elapsed-time budget exhausted", code="retry_deadline_exceeded")
+                raise TerminalAgentError(
+                    "Operation retry elapsed-time budget exhausted",
+                    code="retry_deadline_exceeded",
+                )
+            timeout = asyncio.timeout(remaining)
             try:
-                async with asyncio.timeout(remaining):
+                async with timeout:
                     return await operation()
             except TimeoutError as exc:
-                error = TerminalAgentError(
+                if not timeout.expired():
+                    raise
+                deadline_error = TerminalAgentError(
                     "Operation retry elapsed-time budget exhausted; remote outcome may be unknown",
-                    code="retry_deadline_exceeded", details={"remote_outcome_unknown": True},
+                    code="retry_deadline_exceeded",
+                    details={"remote_outcome_unknown": True},
                 )
-                raise error from exc
+                raise deadline_error from exc
         except Exception as exc:
             error = normalize_exception(exc)
-            if not retry or not is_retryable_exception(error) or attempt + 1 >= policy.max_attempts:
+            if (
+                not retry
+                or not is_retryable_exception(error)
+                or attempt + 1 >= policy.max_attempts
+            ):
                 if error is exc:
                     raise
                 raise error from exc
-            delay = min(policy.max_delay, policy.initial_delay * (2 ** attempt))
+            delay = min(policy.max_delay, policy.initial_delay * (2**attempt))
             if policy.elapsed_time_budget is not None:
                 remaining = policy.elapsed_time_budget - (monotonic() - started)
                 if delay >= remaining:
+                    if error is exc:
+                        raise
                     raise error from exc
             await asyncio.sleep(delay)
     raise AssertionError("Retry loop exited without a result")
