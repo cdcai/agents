@@ -1,6 +1,8 @@
 import asyncio
+import copy
+import inspect
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Self, cast
 
 import openai
@@ -14,6 +16,11 @@ from ..abstract import (
     _Agent,
     _Provider,
     _StoppingCondition,
+)
+from ..budgets import (
+    ExecutionDeadline,
+    ExecutionDeadlineExceeded,
+    RequestBudgetExceededError,
 )
 from ..json_tool_gen import ResolvedTool, Tool, ToolDefinition
 from ..providers import AzureOpenAIProvider
@@ -61,6 +68,8 @@ class Agent(_Agent):
         tools: Sequence[Tool[Any] | ToolDefinition] | None = None,
         callbacks: Sequence[Callback[Self]] | None = None,
         oai_kwargs: dict[str, Any] | None = None,
+        context_rebuild_hook: Callable[..., Any] | None = None,
+        elapsed_time_budget: float | None = None,
         **fmt_kwargs: Any,
     ) -> None:
         """
@@ -85,6 +94,10 @@ class Agent(_Agent):
         )
 
         self.fmt_kwargs = fmt_kwargs
+        if elapsed_time_budget is not None:
+            ExecutionDeadline(elapsed_time_budget)  # Validate before starting work.
+        self.elapsed_time_budget = elapsed_time_budget
+        self.context_rebuild_hook = context_rebuild_hook
         self.stopping_condition = stopping_condition
         # We default to Azure OpenAI here, but
         # we could also use something else as long as it follows the OpenAI API
@@ -128,14 +141,50 @@ class Agent(_Agent):
             self.reset()
 
         try:
-            while not (self.is_terminated or self.is_truncated):
-                logger.debug(f"Running step {self.curr_step}.")
-                await self.step()
+            budget = getattr(self, "elapsed_time_budget", None)
+            deadline = getattr(self, "execution_deadline", None)
+            if budget is not None and deadline is None:
+                deadline = self.execution_deadline = ExecutionDeadline(budget)
+            timeout = asyncio.timeout(deadline.remaining if deadline else None)
+            try:
+                async with timeout:
+                    if deadline is not None:
+                        deadline.check()
+                    while not (self.is_terminated or self.is_truncated):
+                        logger.debug(f"Running step {self.curr_step}.")
+                        await self.step()
+            except TimeoutError as error:
+                if timeout.expired():
+                    raise ExecutionDeadlineExceeded(budget) from error
+                raise
         except Exception as err:
             await self._dispatch_callbacks(err)
             raise
         else:
             await self._dispatch_callbacks(None)
+
+    async def rebuild_context(
+        self, messages: list[Message], error: RequestBudgetExceededError
+    ) -> list[Message] | None:
+        """Application-owned semantic compaction, attempted once before submission.
+
+        Return a replacement request context without mutating the audit history.
+        The provider checks the replacement again; returning None preserves the
+        budget failure. The framework never discards evidence automatically.
+        """
+        hook = getattr(self, "context_rebuild_hook", None)
+        if hook is None:
+            return None
+        replacement = hook(self, copy.deepcopy(messages), error)
+        if inspect.isawaitable(replacement):
+            replacement = await replacement
+        return replacement
+
+    def record_request(self, request: Mapping[str, Any]) -> None:
+        """Keep submitted contexts independent of future context rebuilding."""
+        if not hasattr(self, "request_history"):
+            self.request_history = []
+        self.request_history.append(copy.deepcopy(dict(request)))
 
     async def _dispatch_callbacks(self: Self, exc: Exception | None) -> None:
         outcome = (
@@ -349,6 +398,8 @@ class Agent(_Agent):
         self.truncated = False
         self.terminated = False
         self._active_tools = {}
+        self.request_history: list[dict[str, Any]] = []
+        self.execution_deadline: ExecutionDeadline | None = None
 
     def dump(self, outfile):
         """
@@ -429,6 +480,8 @@ class StructuredOutputAgent(Agent):
         tools: Sequence[Tool[Any] | ToolDefinition] | None = None,
         callbacks: Sequence[Callback[Self]] | None = None,
         oai_kwargs: dict[str, Any] | None = None,
+        context_rebuild_hook: Callable[..., Any] | None = None,
+        elapsed_time_budget: float | None = None,
         **fmt_kwargs: Any,
     ) -> None:
         """
@@ -480,6 +533,8 @@ class StructuredOutputAgent(Agent):
             tools=tools_internal,
             callbacks=callbacks,
             oai_kwargs=oai_kwargs,
+            context_rebuild_hook=context_rebuild_hook,
+            elapsed_time_budget=elapsed_time_budget,
             **fmt_kwargs,
         )
 
@@ -487,11 +542,5 @@ class StructuredOutputAgent(Agent):
         """
         Reset agent state for a re-run
         """
-        self.scratchpad = ""
+        super().reset()
         self.answer = {}
-        self.tool_res_payload = []
-        self.callback_output = []
-        self.curr_step = 1
-        self.truncated = False
-        self.terminated = False
-        self._active_tools = {}

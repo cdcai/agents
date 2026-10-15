@@ -67,6 +67,64 @@ The latest immutable state is available as `provider.batch_progress`. Alternate
 displays can implement `BatchProgressRenderer` and be supplied to an
 `OpenAIBatchAPIHelper`; configure `progress_max_items` on that custom helper.
 
+### Request budgets and elapsed deadlines
+
+Providers can check the complete rendered request before a network submission,
+including accumulated tool history, tool definitions, and output schemas:
+
+```python
+from agents import RequestBudget
+from agents.providers import AzureOpenAIBatchProvider
+
+budget = RequestBudget(
+    model_name="my-deployment",
+    max_input_tokens=272_000,
+    output_reservation=32_768,
+    safety_margin=8_000,
+    provenance=("deployment owner's configured input cutoff",),
+)
+provider = AzureOpenAIBatchProvider(
+    "my-deployment", request_budget=budget,
+)
+```
+
+The default 272,000-token input cutoff is a configurable guess, not a statement
+about a model's context window. `resolve_request_budget` accepts best-effort
+metadata and explicit overrides without requiring discovery or interpreting
+deployment names. Explicit overrides take precedence. Optional `context_window`
+and `max_output_tokens` constraints remain separate from the input cutoff.
+Output and additional reasoning reservations reduce available context capacity;
+the larger of their sum and a request's output-token limit is reserved. A
+completion-token limit already includes reasoning and is not counted twice.
+
+Counts are estimates. Install `tiktoken` and populate its encoding cache to use
+the configured tokenizer (default `o200k_base`). If it is unavailable, conservative
+UTF-8 byte estimates keep preflight available and may require smaller requests.
+A custom `token_counter` supports another tokenizer. Estimates report separate
+system, user, history, tools, schema, other, and framing components. Compare them
+with returned input usage to assess estimator accuracy. Multimodal payloads need
+a dedicated estimator and are rejected by the text estimator.
+
+An oversized request raises terminal `RequestBudgetExceededError` with its
+structured `estimate`, budget, and provenance. Applications can pass
+`context_rebuild_hook=hook` to an `Agent`, or override its async
+`rebuild_context(messages, error)` method. A hook receives `(agent, messages,
+error)` and returns replacement messages or `None`; sync and async hooks work.
+The provider checks the replacement once before submission. Evidence selection
+and compression belong to the application. `tool_res_payload` and `scratchpad`
+retain the execution audit, while `request_history` stores independent snapshots
+of submitted contexts. Resetting an agent starts a new audit.
+
+`Agent(..., elapsed_time_budget=seconds)` bounds the agent's own execution across
+steps and continuation calls. Resetting starts a new elapsed budget. Terminal
+callbacks run after this timer so they can persist the outcome; callback agents
+can have independent budgets. A local `ExecutionDeadlineExceeded` cancels and
+awaits only the current agent's pending work. It does not close a shared provider
+or cancel an unrelated request's remote batch. The SDK's HTTP `timeout`, the
+provider's `batch_polling_deadline`, and operation retry limits are separate
+settings. A local deadline cannot prove remote execution stopped; an immediate
+retry can duplicate remote work.
+
 ## Public Domain and CC0 Notice
 
 This repository constitutes a work of the United States Government and is not
