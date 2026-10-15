@@ -4,13 +4,17 @@ on:
   pull_request:
     paths:
       - '**.py'
-      - .github/workflows/test.yml
+      - pyproject.toml
+      - test_requirements.txt
+      - .github/workflows/test.yaml
   push:
     branches:
       - main
     paths:
       - '**.py'
-      - .github/workflows/test.yml
+      - pyproject.toml
+      - test_requirements.txt
+      - .github/workflows/test.yaml
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -33,9 +37,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r test_requirements.txt
-        pip install -r requirements.txt
-        pip install .
+        python -m pip install ".[test]"
 
     - name: Run tests with pytest
-      run: pytest .
+      run: python -m pytest .

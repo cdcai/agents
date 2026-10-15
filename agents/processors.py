@@ -10,6 +10,8 @@ import tqdm.asyncio as tqdm
 
 from .abstract import _Provider
 from .agent import Agent
+from .exceptions import TerminalAgentError
+from .retries import is_retryable_exception
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +50,14 @@ class _Processor[AgentT: Agent, DataInputT](metaclass=ABCMeta):
         self.data = data
         self.batch_size = batch_size
         self.n_retry = n_retry
+        if n_retry < 1:
+            raise ValueError(
+                "n_retry must be at least one (including the initial attempt)"
+            )
         self.agent_kwargs = kwargs
         self.provider = provider
         self.agents: list[AgentT] = []
+        self.failures: dict[int, Exception] = {}
 
         # Parallel queues
         #                                idx, retries remaining, batch
@@ -107,6 +114,7 @@ class _Processor[AgentT: Agent, DataInputT](metaclass=ABCMeta):
         # TODO: Hacky, patching issue where placeholder can't be composed from within agent_handler
         # because we only have str-formatted batch at that point rather than the original data
         out.placeholder = self._placeholder(batch)
+        out.last_error = None
 
         return out
 
@@ -115,10 +123,25 @@ class _Processor[AgentT: Agent, DataInputT](metaclass=ABCMeta):
         Load inqueue for parallel processing
         """
         logger.info("Loading Inqueue")
+        self.agents = []
         for i, batch in enumerate(self._iter()):
-            self.in_q.put_nowait((i, self.n_retry, self._spawn_agent(batch)))
+            agent = self._spawn_agent(batch)
+            self.agents.append(agent)
+            self.in_q.put_nowait((i, self.n_retry, agent))
 
         self.error_tasks = 0
+        self.failures.clear()
+
+    @staticmethod
+    def _missing_answer(agent: AgentT) -> bool:
+        # A terminated agent may deliberately return an empty/no-code result.
+        return agent.answer is None or (not agent.answer and not agent.is_terminated)
+
+    def _record_failure(self, idx: int, agent: AgentT, error: Exception) -> None:
+        agent.last_error = error
+        self.failures[idx] = error
+        agent.answer = agent.placeholder
+        self.error_tasks += 1
 
     @staticmethod
     def dequeue[QueueItemT](q: asyncio.Queue[QueueItemT]) -> list[QueueItemT]:
@@ -186,16 +209,13 @@ class SeqProcessor[AgentT: Agent, DataInputT](_Processor[AgentT, DataInputT]):
                 )
             )
 
-        # Wait until the queue is processed
-        await self.in_q.join()
-
-        # Terminate workers
-        for worker in workers:
-            worker.cancel()
-
-        await asyncio.gather(*workers, return_exceptions=True)
-
-        self.pbar.close()
+        try:
+            await self.in_q.join()
+        finally:
+            for worker in workers:
+                worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+            self.pbar.close()
 
         if self.error_tasks > 0:
             logger.warning(
@@ -206,7 +226,6 @@ class SeqProcessor[AgentT: Agent, DataInputT](_Processor[AgentT, DataInputT]):
         out = []
         for _, ag in self.dequeue(self.out_q):
             out.append(ag.answer)
-            self.agents.append(ag)
 
         return out
 
@@ -223,35 +242,36 @@ class SeqProcessor[AgentT: Agent, DataInputT](_Processor[AgentT, DataInputT]):
                 )
                 break
 
-            errored = False
+            error: Exception | None = None
             try:
-                await agent(reset=True)
+                await agent(reset=retry_left == self.n_retry)
 
-                if len(agent.answer) == 0:
-                    logger.error(
-                        f"[_worker - {worker_name}]: No answer was provided for query {id}"
+                if self._missing_answer(agent):
+                    error = TerminalAgentError(
+                        f"No answer was provided for query {id}",
+                        code="missing_agent_answer",
                     )
-                    errored = True
 
             except asyncio.CancelledError:
                 self.in_q.task_done()
                 raise
 
-            except Exception:
+            except Exception as exc:
                 logger.exception(f"[_worker - {worker_name}]: Task {id} failed")
-                errored = True
+                error = exc
 
             self.in_q.task_done()
 
-            if errored:
+            if error is not None:
                 retry_left -= 1
-                if retry_left < 0:
+                if retry_left <= 0 or not is_retryable_exception(
+                    error, agent_scope=True
+                ):
                     # End retries, fill in data with placeholder
                     logger.error(
-                        f"[_worker - {worker_name}]: Task {id} failed {self.n_retry} times and will not be retried"
+                        f"[_worker - {worker_name}]: Task {id} failed after {self.n_retry - retry_left} attempts and will not be retried"
                     )
-                    agent.answer = agent.placeholder
-                    self.error_tasks += 1
+                    self._record_failure(id, agent, error)
                 else:
                     # Send data back to queue to retry processing
                     logger.info(
@@ -377,9 +397,12 @@ class AllCallProcessor[AgentT: Agent, DataInputT](_Processor[AgentT, DataInputT]
                             name=f"batch-worker-{idx}",
                         )
                     )
-                # Wait for all agents to complete
-                await asyncio.wait(workers)
+                await asyncio.gather(*workers)
+                workers.clear()
         finally:
+            for worker in workers:
+                worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
             self.pbar.close()
 
         if self.error_tasks > 0:
@@ -387,16 +410,13 @@ class AllCallProcessor[AgentT: Agent, DataInputT](_Processor[AgentT, DataInputT]
                 f"[process] There were {self.error_tasks} unsucessful batches!"
             )
 
-        # Throw a wrench if nothing was successful.
-        if self.error_tasks == self.out_q.qsize():
-            raise RuntimeError("No agents were successful! Check the logs.")
-
         # De-queue into list from output queue
         out = []
         for _, ag in self.dequeue(self.out_q):
             out.append(ag.answer)
-            self.agents.append(ag)
 
+        if self.error_tasks and self.error_tasks == len(out):
+            raise RuntimeError("No agents were successful! Check the logs.")
         return out
 
     async def _agent_handler(self, agent: AgentT, id: int, retry_left: int) -> None:
@@ -405,27 +425,28 @@ class AllCallProcessor[AgentT: Agent, DataInputT](_Processor[AgentT, DataInputT]
 
         handles retries and errors, returning a placeholder if the agent fails
         """
-        errored = False
+        error: Exception | None = None
         try:
-            await agent(reset=True)
+            await agent(reset=retry_left == self.n_retry)
 
-            if len(agent.answer) == 0:
-                logger.error(f"[_agent_handler]: No answer was provided for query {id}")
-                errored = True
+            if self._missing_answer(agent):
+                error = TerminalAgentError(
+                    f"No answer was provided for query {id}",
+                    code="missing_agent_answer",
+                )
 
-        except Exception:
+        except Exception as exc:
             logger.exception(f"[_agent_handler]: Task {id} failed")
-            errored = True
+            error = exc
 
-        if errored:
+        if error is not None:
             retry_left -= 1
-            if retry_left <= 0:
+            if retry_left <= 0 or not is_retryable_exception(error, agent_scope=True):
                 # End retries, fill in data with placeholder
                 logger.error(
-                    f"[_agent_handler]: Task {id} failed {self.n_retry} times and will not be retried"
+                    f"[_agent_handler]: Task {id} failed after {self.n_retry - retry_left} attempts and will not be retried"
                 )
-                agent.answer = agent.placeholder
-                self.error_tasks += 1
+                self._record_failure(id, agent, error)
             else:
                 # Send data back to queue to retry processing
                 logger.info(

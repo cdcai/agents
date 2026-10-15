@@ -4,13 +4,17 @@ on:
   pull_request:
     paths:
       - '**.py'
-      - .github/workflows/coverage.yml
+      - pyproject.toml
+      - test_requirements.txt
+      - .github/workflows/coverage.yaml
   push:
     branches:
       - main
     paths:
       - '**.py'
-      - .github/workflows/coverage.yml
+      - pyproject.toml
+      - test_requirements.txt
+      - .github/workflows/coverage.yaml
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -31,12 +35,10 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r test_requirements.txt
-        pip install -r requirements.txt
-        pip install .
+        python -m pip install ".[test]"
 
     - name: Run tests with pytest
-      run: pytest . --cov --cov-report xml:main.xml
+      run: python -m pytest . --cov --cov-report xml:main.xml
 
     # - name: Upload results to Codecov
     #   uses: codecov/codecov-action@v5
