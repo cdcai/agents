@@ -151,16 +151,21 @@ def resolve_request_budget(
 @lru_cache(maxsize=8)
 def _encoding(name: str):
     try:
-        import tiktoken  # type: ignore[import-not-found]
+        from tiktoken.registry import ENCODINGS  # type: ignore[import-not-found]
 
-        return tiktoken.get_encoding(name)
-    except Exception:  # noqa: BLE001 - optional third-party tokenizer/cache failures
-        # An unavailable package, encoding, or offline cache cannot disable the
-        # preflight. Byte counts err toward smaller requests instead.
-        logger.warning(
-            "Tokenizer %s unavailable; using conservative UTF-8 byte estimates", name
-        )
-        return None
+        # get_encoding may fetch tokenizer assets synchronously. Request
+        # preflight must stay local and remain interruptible by agent deadlines.
+        # Applications may explicitly preload their encoding before starting
+        # the event loop, or supply a custom token_counter.
+        encoding = ENCODINGS.get(name)
+        if encoding is not None:
+            return encoding
+    except Exception:
+        logger.debug("Optional tokenizer registry unavailable", exc_info=True)
+    logger.warning(
+        "Tokenizer %s is not preloaded; using conservative UTF-8 byte estimates", name
+    )
+    return None
 
 
 def _counter(budget: RequestBudget) -> tuple[Callable[[str], int], str]:

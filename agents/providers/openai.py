@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import inspect
 import json
 import logging
@@ -777,7 +778,9 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
     @staticmethod
     async def _rebuild_context(ag, prompt, error):
         rebuild = getattr(ag, "rebuild_context", None)
-        replacement = rebuild(prompt, error) if rebuild is not None else None
+        replacement = (
+            rebuild(copy.deepcopy(prompt), error) if rebuild is not None else None
+        )
         return await replacement if inspect.isawaitable(replacement) else replacement
 
     async def _prepare_request(self, ag, prompt, kwargs, *, allow_rebuild=True):

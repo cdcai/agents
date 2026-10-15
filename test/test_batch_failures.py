@@ -2,7 +2,8 @@
 
 import asyncio
 import json
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -443,6 +444,30 @@ async def test_sync_context_override_is_supported_and_remote_unchanged_context_i
     provider.endpoint_fn.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_override_mutating_rebuilt_messages_preserves_the_original_audit():
+    provider = prompt_provider()
+    response = provider.endpoint_fn.return_value
+    provider.endpoint_fn.side_effect = [
+        ContextLengthExceededError("remote overflow"),
+        response,
+    ]
+    agent = SimpleAgent(provider, batch="one")
+    original = [{"role": "user", "content": "full original evidence"}]
+
+    def rebuild(messages, error):
+        messages[0]["content"] = "compact"
+        return messages
+
+    agent.rebuild_context = rebuild
+    await provider.prompt_agent(agent, original)
+    assert original[0]["content"] == "full original evidence"
+    assert (
+        agent.request_history[0]["messages"][0]["content"] == "full original evidence"
+    )
+    assert agent.request_history[1]["messages"][0]["content"] == "compact"
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -456,3 +481,25 @@ async def test_sync_context_override_is_supported_and_remote_unchanged_context_i
 def test_invalid_retry_policy_is_rejected(kwargs):
     with pytest.raises(ValueError):
         RetryPolicy(**kwargs)
+
+
+def test_tokenizer_lookup_never_downloads_assets(monkeypatch):
+    from agents.budgets import _encoding
+
+    package = ModuleType("tiktoken")
+    registry = ModuleType("tiktoken.registry")
+    encoding = object()
+    registry.ENCODINGS = {"loaded-local-test": encoding}
+
+    def no_download(*args, **kwargs):
+        pytest.fail("Preflight attempted to download tokenizer assets")
+
+    package.get_encoding = no_download
+    monkeypatch.setitem(sys.modules, "tiktoken", package)
+    monkeypatch.setitem(sys.modules, "tiktoken.registry", registry)
+    _encoding.cache_clear()
+    try:
+        assert _encoding("cold-local-test") is None
+        assert _encoding("loaded-local-test") is encoding
+    finally:
+        _encoding.cache_clear()

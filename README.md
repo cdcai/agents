@@ -97,9 +97,11 @@ Output and additional reasoning reservations reduce available context capacity;
 the larger of their sum and a request's output-token limit is reserved. A
 completion-token limit already includes reasoning and is not counted twice.
 
-Counts are estimates. Install `tiktoken` and populate its encoding cache to use
-the configured tokenizer (default `o200k_base`). If it is unavailable, conservative
-UTF-8 byte estimates keep preflight available and may require smaller requests.
+Counts are estimates. To use `tiktoken`, explicitly load its encoding before
+starting agents, for example `tiktoken.get_encoding("o200k_base")` at startup
+(this can download assets). Preflight uses only encodings already loaded in the
+process and never downloads tokenizer data. Otherwise conservative UTF-8 byte
+estimates keep preflight available and may require smaller requests.
 A custom `token_counter` supports another tokenizer. Estimates report separate
 system, user, history, tools, schema, other, and framing components. Compare them
 with returned input usage to assess estimator accuracy. Multimodal payloads need
