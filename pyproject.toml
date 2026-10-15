@@ -27,8 +27,9 @@ dependencies = [
 test = [
     "pytest",
     "pytest-asyncio",
+    "pytest-cov",
     "pytest-mock",
-    "httpx"
+    "httpx",
 ]
 
 dev = [
