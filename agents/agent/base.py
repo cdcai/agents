@@ -1,13 +1,27 @@
 import asyncio
+import copy
+import inspect
 import logging
-from collections.abc import Awaitable, Callable, Sequence
-from typing import Any, cast
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, Self, cast
 
 import openai
 from openai.types.chat.chat_completion import Choice
 from pydantic import BaseModel
 
-from ..abstract import Message, _Agent, _Provider, _StoppingCondition
+from ..abstract import (
+    Callback,
+    CallbackCondition,
+    Message,
+    _Agent,
+    _Provider,
+    _StoppingCondition,
+)
+from ..budgets import (
+    ExecutionDeadline,
+    ExecutionDeadlineExceeded,
+    RequestBudgetExceededError,
+)
 from ..json_tool_gen import ResolvedTool, Tool, ToolDefinition
 from ..providers import AzureOpenAIProvider
 from ..stopping_conditions import StopOnDataModel
@@ -17,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 class Agent(_Agent):
     """
+
     Base Class for language agents, which can be initialized directly or subclassed depending on use case.
 
     :param bool terminated: Whether agent has completed it's run (use :func:`reset`, to reset)
@@ -30,7 +45,7 @@ class Agent(_Agent):
     :param dict oai_kwargs: OpenAI arguments passed as-is to API (temperature, top_p, etc.)
     :param list TOOLS: Runtime collection of tools available to the agent. Tools
         are declared with the constructor or ``@agent_callable`` decorators.
-    :param list CALLBACKS: List of callbacks to evaluate at completion. Should be a list of callables with a signature `fun(self, answer, scratchpad)`
+    :param list CALLBACKS: Callbacks with a condition and an async signature `callback(agent, exc)`.
     :param _StoppingCondition stopping_condition: The StoppingCondition handler class which will be called after each step to determine if the task is completed.
 
 
@@ -41,9 +56,13 @@ class Agent(_Agent):
 
     Callback Use
     ------------
-    Each callback will have access to class object, scratchpad, and final answer, thus the signature must match.
+    Each callback receives the calling agent and its run exception, or None on success.
+    Its condition selects whether it runs on success, on error, or both.
     This is still quite experimental, but the intended usecase is for reflection / refinement applications.
     """
+
+    request_history: list[dict[str, Any]]
+    execution_deadline: ExecutionDeadline | None
 
     def __init__(
         self,
@@ -51,8 +70,10 @@ class Agent(_Agent):
         model_name: str | None = None,
         provider: _Provider[Any] | None = None,
         tools: Sequence[Tool[Any] | ToolDefinition] | None = None,
-        callbacks: Sequence[Callable[..., Any]] | None = None,
+        callbacks: Sequence[Callback[Self]] | None = None,
         oai_kwargs: dict[str, Any] | None = None,
+        context_rebuild_hook: Callable[..., Any] | None = None,
+        elapsed_time_budget: float | None = None,
         **fmt_kwargs: Any,
     ) -> None:
         """
@@ -62,7 +83,7 @@ class Agent(_Agent):
         :param str model_name: Name of model to use (or deployment name for AzureOpenAI) (optional if provider is passed)
         :param Type[_Provider] provider: Instantiated OpenAI instance to use (optional)
         :param tools: Executable tools or legacy definitions backed by agent methods (optional)
-        :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
+        :param callbacks: Callbacks dispatched according to their condition (optional)
         :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
         :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
         """
@@ -77,6 +98,10 @@ class Agent(_Agent):
         )
 
         self.fmt_kwargs = fmt_kwargs
+        if elapsed_time_budget is not None:
+            ExecutionDeadline(elapsed_time_budget)  # Validate before starting work.
+        self.elapsed_time_budget = elapsed_time_budget
+        self.context_rebuild_hook = context_rebuild_hook
         self.stopping_condition = stopping_condition
         # We default to Azure OpenAI here, but
         # we could also use something else as long as it follows the OpenAI API
@@ -119,26 +144,74 @@ class Agent(_Agent):
         if reset:
             self.reset()
 
-        while not (self.is_terminated or self.is_truncated):
-            logger.debug(f"Running step {self.curr_step}.")
-            await self.step()
+        try:
+            budget = getattr(self, "elapsed_time_budget", None)
+            deadline = getattr(self, "execution_deadline", None)
+            if budget is not None and deadline is None:
+                deadline = self.execution_deadline = ExecutionDeadline(budget)
+            timeout = asyncio.timeout(deadline.remaining if deadline else None)
+            try:
+                async with timeout:
+                    if deadline is not None:
+                        deadline.check()
+                    while not (self.is_terminated or self.is_truncated):
+                        logger.debug(f"Running step {self.curr_step}.")
+                        await self.step()
+            except TimeoutError as error:
+                if timeout.expired():
+                    raise ExecutionDeadlineExceeded(cast(float, budget)) from error
+                raise
+        except Exception as err:
+            self.last_error = err
+            await self._dispatch_callbacks(err)
+            raise
+        else:
+            self.last_error = None
+            await self._dispatch_callbacks(None)
 
-        # Evaluate callbacks, if available
+    async def rebuild_context(
+        self, messages: list[Message], error: RequestBudgetExceededError
+    ) -> list[Message] | None:
+        """Application-owned semantic compaction, attempted once before submission.
+
+        Return a replacement request context without mutating the audit history.
+        The provider checks the replacement again; returning None preserves the
+        budget failure. The framework never discards evidence automatically.
+        """
+        hook = getattr(self, "context_rebuild_hook", None)
+        if hook is None:
+            return None
+        replacement = hook(self, copy.deepcopy(messages), error)
+        if inspect.isawaitable(replacement):
+            replacement = await replacement
+        return replacement
+
+    def record_request(self, request: Mapping[str, Any]) -> None:
+        """Keep submitted contexts independent of future context rebuilding."""
+        if not hasattr(self, "request_history"):
+            self.request_history = []
+        self.request_history.append(copy.deepcopy(dict(request)))
+
+    async def _dispatch_callbacks(self: Self, exc: Exception | None) -> None:
+        outcome = (
+            CallbackCondition.ON_SUCCESS if exc is None else CallbackCondition.ON_ERROR
+        )
+
         for callback in self.CALLBACKS:
-            await self._handle_callback(
-                callback, self, answer=self.answer, scratchpad=self.scratchpad
-            )
+            if callback.condition in (CallbackCondition.ALWAYS, outcome):
+                await self._handle_callback(callback, exc)
 
     async def _handle_callback(
-        self, func: Callable[..., Awaitable[None]], *args, **kwargs
-    ):
+        self, func: Callback[Self], exc: Exception | None
+    ) -> None:
         """
         Wrapper to handle callback gracefully
         """
         try:
-            await func(*args, **kwargs)
+            await func(self, exc)
         except Exception as err:
             logger.exception("Agent encountered an error during callback evaluation")
+            # TODO: This output needs to be more traceable/indexable than a list
             self.callback_output.append(err)
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -331,6 +404,9 @@ class Agent(_Agent):
         self.truncated = False
         self.terminated = False
         self._active_tools = {}
+        self.request_history = []
+        self.execution_deadline = None
+        self.last_error = None
 
     def dump(self, outfile):
         """
@@ -409,8 +485,10 @@ class StructuredOutputAgent(Agent):
         stopping_condition: _StoppingCondition | None = None,
         provider: _Provider[Any] | None = None,
         tools: Sequence[Tool[Any] | ToolDefinition] | None = None,
-        callbacks: Sequence[Callable[..., Any]] | None = None,
+        callbacks: Sequence[Callback[Self]] | None = None,
         oai_kwargs: dict[str, Any] | None = None,
+        context_rebuild_hook: Callable[..., Any] | None = None,
+        elapsed_time_budget: float | None = None,
         **fmt_kwargs: Any,
     ) -> None:
         """
@@ -424,7 +502,7 @@ class StructuredOutputAgent(Agent):
         :param str model_name: Name of model to use (or deployment name for AzureOpenAI) (optional if provider is passed)
         :param Type[_Provider] provider: Instantiated OpenAI instance to use (optional)
         :param tools: Executable tools or legacy definitions backed by agent methods (optional)
-        :param List[Callable] callbacks: List of callbacks to evaluate at end of run (optional)
+        :param callbacks: Callbacks dispatched according to their condition (optional)
         :param dict[str, any] oai_kwargs: Dict of additional OpenAI arguments to pass thru to chat call
         :param fmt_kwargs: Additional named arguments which will be inserted into the :func:`BASE_PROMPT` via fstring
 
@@ -462,6 +540,8 @@ class StructuredOutputAgent(Agent):
             tools=tools_internal,
             callbacks=callbacks,
             oai_kwargs=oai_kwargs,
+            context_rebuild_hook=context_rebuild_hook,
+            elapsed_time_budget=elapsed_time_budget,
             **fmt_kwargs,
         )
 
@@ -469,11 +549,5 @@ class StructuredOutputAgent(Agent):
         """
         Reset agent state for a re-run
         """
-        self.scratchpad = ""
+        super().reset()
         self.answer = {}
-        self.tool_res_payload = []
-        self.callback_output = []
-        self.curr_step = 1
-        self.truncated = False
-        self.terminated = False
-        self._active_tools = {}
