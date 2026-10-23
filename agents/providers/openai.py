@@ -1,6 +1,9 @@
 import asyncio
+import copy
+import inspect
 import json
 import logging
+import math
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -9,12 +12,11 @@ from io import BytesIO
 from tempfile import SpooledTemporaryFile
 from typing import (
     IO,
+    Any,
     Literal,
     TypedDict,
     cast,
 )
-
-import backoff
 
 try:
     import openai
@@ -56,7 +58,15 @@ from ..batch_progress import (
 from ..batch_progress import (
     BatchRequestCounts as ProgressRequestCounts,
 )
+from ..exceptions import (
+    BatchPollingDeadlineExceeded,
+    BatchProtocolError,
+    ContextLengthExceededError,
+    RetryableBatchRequestError,
+    TerminalBatchRequestError,
+)
 from ..observability import LLMUsage, Observable
+from ..retries import RetryPolicy, retry_operation
 
 DEFAULT_BATCH_SIZE = 1000
 
@@ -69,7 +79,7 @@ MAX_BATCH_FILE_SIZE = 200_000_000
 MIN_SIZE_FOR_OFFLOAD = 8_000_000
 
 
-class RequestTooLargeError(ValueError):
+class RequestTooLargeError(ValueError, TerminalBatchRequestError):
     def __init__(self, custom_id: str, size: int, limit: int) -> None:
         self.custom_id = custom_id
         self.size = size
@@ -93,6 +103,64 @@ BATCH_TRACKING_CANCELLED_STATUS = "tracking_cancelled"
 BATCH_TRACKING_FAILED_STATUS = "tracking_failed"
 
 BatchStatusCallback = Callable[[Batch], None]
+
+
+def _request_error(
+    result: dict, batch_id: str
+) -> TerminalBatchRequestError | RetryableBatchRequestError:
+    """Normalize ordinary OpenAI and nested Azure errors without losing details."""
+    response = result.get("response")
+    status = response.get("status_code") if isinstance(response, dict) else None
+    body = response.get("body") if isinstance(response, dict) else None
+    raw_error = result.get("error")
+    error = raw_error if raw_error is not None else body
+    code = None
+    message = "Batch request failed"
+    # Azure sometimes places an error dictionary inside error.message.
+    for _ in range(8):
+        if isinstance(error, str):
+            message = error
+            break
+        if not isinstance(error, dict):
+            break
+        code = error.get("code") or code
+        if "error" in error:
+            error = error["error"]
+        elif isinstance(error.get("message"), (dict, str)):
+            error = error["message"]
+        else:
+            break
+    lowered = message.lower()
+    transient = code in {
+        "rate_limit_exceeded",
+        "server_error",
+        "request_timeout",
+        "timeout",
+        "batch_expired",
+    }
+    transient = (
+        transient
+        or status in {408, 409, 429}
+        or (isinstance(status, int) and status >= 500)
+    )
+    transient = (
+        transient
+        or "request timed out" in lowered
+        or "temporarily unavailable" in lowered
+    )
+    error_class = (
+        ContextLengthExceededError
+        if code == "context_length_exceeded"
+        else (RetryableBatchRequestError if transient else TerminalBatchRequestError)
+    )
+    return error_class(
+        message,
+        custom_id=result.get("custom_id"),
+        batch_id=batch_id,
+        status_code=status,
+        code=code,
+        details=result,
+    )
 
 
 def _noop_batch_status_callback(_batch: Batch) -> None:
@@ -137,7 +205,7 @@ class OpenAIToolCall(_ToolCall):
 
 class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
     # The time in seconds to wait before checking if a batch has been completed
-    api_timeout: int = 30
+    poll_frequency: int
 
     def __init__(
         self,
@@ -146,6 +214,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         *,
         progress_max_items: int = DEFAULT_BATCH_PROGRESS_MAX_ITEMS,
         progress_renderer: BatchProgressRenderer | None = None,
+        poll_frequency: int = 60,
     ):
         self.batch_size = batch_size
         self.n_workers = n_workers
@@ -158,6 +227,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         self._progress_renderer = progress_renderer
         self._progress_enabled = self.progress_max_items != 0
         self._progress_renderer_closed = False
+        self.poll_frequency = poll_frequency
 
     @property
     def batch_progress(self) -> BatchProgressState:
@@ -478,63 +548,109 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
             # Close batch file after we're done with it
             with batch:
                 batch_file = await self.provider.send_batch(batch)
-            batch_task = await self.provider.create_batch_task(
-                batch_file,
-                timeout=self.api_timeout,
-                status_callback=status_callback,
-            )
-
-            if batch_task.errors is not None and batch_task.errors.data is not None:
-                # Batch returned an error. Raise
-                errors = "\n".join(
-                    f"[{err.code}]: {err.message}" for err in batch_task.errors.data
+            deadline_error = None
+            try:
+                batch_task = await self.provider.create_batch_task(
+                    batch_file,
+                    timeout=self.poll_frequency,
+                    status_callback=status_callback,
                 )
-                logger.error(f"Batch {batch_task.id} returned an error:\n{errors}")
-                raise RuntimeError(
-                    f"Batch {batch_task.id} returned an error:\n{errors}"
+            except BatchPollingDeadlineExceeded as exc:
+                # Preserve every available result before failing unresolved work.
+                deadline_error = exc
+                batch_task = exc.batch
+                status_callback(batch_task)
+                self._finish_interrupted_batch(
+                    latest_snapshot, BATCH_TRACKING_FAILED_STATUS
                 )
 
             # Get results
-            results = await self.provider.get_batch_results(batch_task)
+            if deadline_error is not None and not (
+                batch_task.output_file_id or batch_task.error_file_id
+            ):
+                results = []
+            else:
+                results = await self.provider.get_batch_results(batch_task)
 
-            # Write out results to dict for agents to pick up
+            # Correlate before resolving: duplicate IDs are ambiguous even when
+            # the first row looks successful. Never overwrite a finished future.
             expected_ids = {batch_id for batch_id in batch_ids}
-            returned_ids = set()
+            grouped: dict[str, list[dict]] = {}
+            protocol_errors = []
             for result in results:
                 if not isinstance(result, dict):
-                    logger.warning(
-                        f"Batch [{batch_task.id}] returned an unexpected result."
-                    )
+                    protocol_errors.append("non-object result")
+                    continue
+                if "_batch_protocol_error" in result:
+                    protocol_errors.append(result["_batch_protocol_error"])
                     continue
                 custom_id = result.get("custom_id")
                 if not isinstance(custom_id, str) or custom_id not in expected_ids:
                     logger.warning(
-                        f"Batch [{batch_task.id}] returned an unexpected result."
+                        "Batch [%s] returned an unexpected result ID.", batch_task.id
                     )
                     continue
+                grouped.setdefault(custom_id, []).append(result)
 
-                returned_ids.add(custom_id)
+            for custom_id in expected_ids:
                 future = self.provider.batch_out.get(custom_id)
                 if future is None or future.done():
                     continue
-
+                rows = grouped.get(custom_id, [])
+                if not rows:
+                    future.set_exception(
+                        deadline_error
+                        or BatchProtocolError(
+                            f"Batch [{batch_task.id}] returned no result for request [{custom_id}].",
+                            custom_id=custom_id,
+                            batch_id=batch_task.id,
+                            code="missing_batch_result",
+                            details={
+                                "batch_status": getattr(batch_task, "status", None),
+                                "batch_errors": getattr(batch_task, "errors", None),
+                                "file_errors": protocol_errors,
+                            },
+                        )
+                    )
+                    continue
+                if len(rows) > 1:
+                    future.set_exception(
+                        BatchProtocolError(
+                            f"Batch [{batch_task.id}] returned duplicate results for request [{custom_id}].",
+                            custom_id=custom_id,
+                            batch_id=batch_task.id,
+                            code="duplicate_batch_result",
+                            details=rows,
+                        )
+                    )
+                    continue
+                result = rows[0]
+                response = result.get("response")
+                status = (
+                    response.get("status_code") if isinstance(response, dict) else None
+                )
+                body = response.get("body") if isinstance(response, dict) else None
+                if (
+                    result.get("error") is not None
+                    or (isinstance(status, int) and status >= 400)
+                    or (isinstance(body, dict) and "error" in body)
+                ):
+                    future.set_exception(_request_error(result, batch_task.id))
+                    continue
                 try:
                     response = ChatCompletion.model_validate(result["response"]["body"])
-                except (KeyError, TypeError, ValidationError) as e:
-                    future.set_exception(e)
+                except (KeyError, TypeError, ValidationError):
+                    future.set_exception(
+                        BatchProtocolError(
+                            f"Batch [{batch_task.id}] returned a malformed result for request [{custom_id}].",
+                            custom_id=custom_id,
+                            batch_id=batch_task.id,
+                            code="malformed_batch_result",
+                            details=result,
+                        )
+                    )
                 else:
                     future.set_result(response)
-
-            for custom_id in expected_ids - returned_ids:
-                future = self.provider.batch_out.get(custom_id)
-                if future is None or future.done():
-                    continue
-                future.set_exception(
-                    RuntimeError(
-                        f"Batch [{batch_task.id}] returned no result for "
-                        f"request [{custom_id}]."
-                    )
-                )
 
             # Log that we're done
             logger.info(f"Batch [{batch_task.id}] completed.")
@@ -616,16 +732,83 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
         model_name: str,
         interactive: bool,
         resource_endpoint: str = "https://cognitiveservices.azure.com/.default",
+        *,
+        request_budget: Any = None,
+        require_request_budget: bool = False,
+        retry_policy: RetryPolicy | None = None,
+        batch_polling_deadline: float | None = None,
         **kwargs,
     ):
         super().__init__(model_name)
         self.model_name = model_name
+        self._configure_execution(
+            request_budget, require_request_budget, retry_policy, batch_polling_deadline
+        )
         self.interactive = interactive
         self.resource_endpoint = resource_endpoint
         self.authenticate()
+        # The provider owns retries so SDK retries cannot multiply its budget.
+        kwargs.setdefault("max_retries", 0)
         self.llm = openai.AsyncAzureOpenAI(
             azure_ad_token_provider=self._bearer_token_generator, **kwargs
         )
+
+    def _configure_execution(
+        self,
+        request_budget,
+        require_request_budget,
+        retry_policy,
+        batch_polling_deadline,
+    ):
+        if batch_polling_deadline is not None and (
+            not math.isfinite(batch_polling_deadline) or batch_polling_deadline <= 0
+        ):
+            raise ValueError("batch_polling_deadline must be positive")
+        if request_budget is None and require_request_budget:
+            from ..budgets import resolve_request_budget
+
+            request_budget = resolve_request_budget(self.model_name)
+        self.request_budget = request_budget
+        self.retry_policy = retry_policy or RetryPolicy()
+        self.batch_polling_deadline = batch_polling_deadline
+
+    async def _operation(self, operation, *, retry=True):
+        return await retry_operation(
+            operation, getattr(self, "retry_policy", RetryPolicy()), retry=retry
+        )
+
+    @staticmethod
+    async def _rebuild_context(ag, prompt, error):
+        rebuild = getattr(ag, "rebuild_context", None)
+        replacement = (
+            rebuild(copy.deepcopy(prompt), error) if rebuild is not None else None
+        )
+        return await replacement if inspect.isawaitable(replacement) else replacement
+
+    async def _prepare_request(self, ag, prompt, kwargs, *, allow_rebuild=True):
+        """Check the fully rendered request and offer one explicit rebuild."""
+        budget = getattr(ag, "request_budget", None) or getattr(
+            self, "request_budget", None
+        )
+        if budget is None:
+            return prompt
+        from ..budgets import RequestBudgetExceededError, check_request_budget
+
+        try:
+            estimate = check_request_budget(
+                {"model": self.model_name, **kwargs, "messages": prompt}, budget
+            )
+        except RequestBudgetExceededError as error:
+            if not allow_rebuild:
+                raise
+            prompt = await self._rebuild_context(ag, prompt, error)
+            if prompt is None:
+                raise
+            estimate = check_request_budget(
+                {"model": self.model_name, **kwargs, "messages": prompt}, budget
+            )
+        ag.last_request_estimate = estimate
+        return prompt
 
     def authenticate(self) -> None:
         """
@@ -653,7 +836,6 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
     async def __aexit__(self, exc_type, exc_value, traceback) -> None:
         await self.close()
 
-    @backoff.on_exception(backoff.expo, openai.APIError, max_tries=3)
     async def prompt_agent(
         self,
         ag: AgentT,
@@ -675,13 +857,40 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
         if not isinstance(prompt, list):
             prompt = [prompt]
 
-        res = await self.endpoint_fn(messages=prompt, model=self.model_name, **kwargs)
+        prompt = await self._prepare_request(ag, prompt, kwargs)
+
+        async def request():
+            if hasattr(ag, "record_request"):
+                ag.record_request(
+                    {"model": self.model_name, **kwargs, "messages": prompt}
+                )
+            return await self.endpoint_fn(
+                messages=prompt, model=self.model_name, **kwargs
+            )
+
+        try:
+            res = await self._operation(request)
+        except ContextLengthExceededError as error:
+            rebuilt = await self._rebuild_context(ag, prompt, error)
+            if rebuilt is None or rebuilt == prompt:
+                raise
+            prompt = await self._prepare_request(
+                ag, rebuilt, kwargs, allow_rebuild=False
+            )
+            res = await self._operation(request)
 
         out = res.choices[0]
 
         # Track usage at the provider level and agent level
         self.all_usage.append(self.usage_adapter(res.usage))
         ag.all_usage.append(self.usage_adapter(res.usage))
+        if getattr(ag, "last_request_estimate", None) is not None:
+            ag.last_request_usage = {
+                "estimated_input_tokens": ag.last_request_estimate.input_tokens,
+                "actual_input_tokens": res.usage.prompt_tokens
+                if res.usage is not None
+                else None,
+            }
 
         # HACK: OpenAI API can't handle None in a roundtrip
         # so we have to patch the message content so it doesn't throw an error.
@@ -862,11 +1071,17 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
 
         :return: An OpenAI File object representing the uploaded batch file
         """
-        file = await self.llm.files.create(
-            file=("batch_tasks.jsonl", file_content, "application/json"),
-            purpose="batch",
-            **kwargs,
-        )
+        start = file_content.tell()
+
+        async def upload():
+            file_content.seek(start)
+            return await self.llm.files.create(
+                file=("batch_tasks.jsonl", file_content, "application/json"),
+                purpose="batch",
+                **kwargs,
+            )
+
+        file = await self._operation(upload)
 
         logger.info(f"Created file [{file.id}]")
 
@@ -877,6 +1092,7 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         batch_file: FileObject,
         timeout: int = 30,
         status_callback: BatchStatusCallback | None = None,
+        polling_deadline: float | None = None,
         **kwargs,
     ) -> Batch:
         """
@@ -894,11 +1110,16 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
             status_callback = _noop_batch_status_callback
 
         try:
-            batch = await self.llm.batches.create(
-                input_file_id=batch_file.id,
-                endpoint="/v1/chat/completions",
-                completion_window="24h",
-                **kwargs,
+            # A lost response to creation can leave a running remote batch.
+            # Do not automatically create a duplicate batch in that case.
+            batch = await self._operation(
+                lambda: self.llm.batches.create(
+                    input_file_id=batch_file.id,
+                    endpoint="/v1/chat/completions",
+                    completion_window="24h",
+                    **kwargs,
+                ),
+                retry=False,
             )
             logger.info(f"Executing batch task [{batch_file.id}] -> [{batch.id}]")
         except Exception:
@@ -906,14 +1127,53 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
             raise
 
         try:
-            status_callback(batch)
-            while batch.status not in OPENAI_BATCH_TERMINAL_STATUSES:
-                logger.info(f"Batch [{batch.id}] Status: {batch.status}")
-                batch = await self.llm.batches.retrieve(batch.id)
-                status_callback(batch)
-                if batch.status not in OPENAI_BATCH_TERMINAL_STATUSES:
-                    await asyncio.sleep(timeout)
 
+            async def poll():
+                nonlocal batch
+                status_callback(batch)
+                while batch.status not in OPENAI_BATCH_TERMINAL_STATUSES:
+                    logger.info(f"Batch [{batch.id}] Status: {batch.status}")
+                    batch_id = batch.id
+                    batch = await self._operation(
+                        lambda batch_id=batch_id: self.llm.batches.retrieve(batch_id)
+                    )
+                    status_callback(batch)
+                    if batch.status not in OPENAI_BATCH_TERMINAL_STATUSES:
+                        await asyncio.sleep(timeout)
+
+            deadline = (
+                polling_deadline
+                if polling_deadline is not None
+                else getattr(self, "batch_polling_deadline", None)
+            )
+            if deadline is None:
+                await poll()
+            else:
+                deadline_context = asyncio.timeout(deadline)
+                try:
+                    async with deadline_context:
+                        await poll()
+                except TimeoutError as exc:
+                    if not deadline_context.expired():
+                        raise
+                    # This helper owns the whole batch. A single caller's agent
+                    # deadline only abandons its future and never reaches here.
+                    try:
+                        async with asyncio.timeout(5):
+                            cancelled = await self.llm.batches.cancel(batch.id)
+                            if isinstance(cancelled, Batch):
+                                batch = cancelled
+                            retrieved = await self.llm.batches.retrieve(batch.id)
+                            if isinstance(retrieved, Batch):
+                                batch = retrieved
+                    except Exception:  # noqa: BLE001 - preserve the original deadline
+                        logger.warning(
+                            "Unable to confirm remote batch state after polling deadline"
+                        )
+                    raise BatchPollingDeadlineExceeded(batch, deadline) from exc
+
+        except BatchPollingDeadlineExceeded:
+            raise
         except (Exception, asyncio.CancelledError):
             # Cancel the remote batch before terminating while preserving the error.
             if batch.status not in OPENAI_BATCH_TERMINAL_STATUSES:
@@ -934,19 +1194,45 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
 
         :return: A list of results from the batch
         """
-        if (
-            batch.status not in OPENAI_BATCH_SUCCESS_STATUSES
-            or batch.output_file_id is None
-        ):
-            raise ValueError("Batch status was not 'completed'! Got: " + batch.status)
-
-        result_stream = await self.llm.files.content(batch.output_file_id)
-        results = await asyncio.to_thread(
-            self._response_from_bytes, result_stream.content
+        file_ids = list(
+            dict.fromkeys(
+                file_id
+                for file_id in (batch.output_file_id, batch.error_file_id)
+                if file_id
+            )
         )
+        if batch.status not in OPENAI_BATCH_TERMINAL_STATUSES and not file_ids:
+            raise BatchProtocolError(
+                f"Batch [{batch.id}] is not terminal: {batch.status}",
+                batch_id=batch.id,
+                code="batch_not_terminal",
+            )
+
+        results = []
+        for file_id in file_ids:
+            try:
+                result_stream = await self._operation(
+                    lambda file_id=file_id: self.llm.files.content(file_id)
+                )
+                results.extend(
+                    await asyncio.to_thread(
+                        self._response_from_bytes, result_stream.content
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve readable sibling files
+                # A broken error file must not discard successes already read.
+                results.append(
+                    {
+                        "_batch_protocol_error": {
+                            "file_id": file_id,
+                            "type": type(exc).__name__,
+                            "code": getattr(exc, "code", None),
+                        }
+                    }
+                )
         # TODO: Now this diverges from how we do it with a chat endpoint
         # but maybe no reason to overcomplicate things.
-        self.round_trips += 1
+        self.round_trips = getattr(self, "round_trips", 0) + 1
 
         return results
 
@@ -956,8 +1242,20 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         with BytesIO() as buffer:
             buffer.write(stream)
             result_text = buffer.getvalue().decode("utf-8")
-            for line in result_text.splitlines():
-                out.append(json.loads(line))
+            for line_number, line in enumerate(result_text.splitlines(), 1):
+                if not line.strip():
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    out.append(
+                        {
+                            "_batch_protocol_error": {
+                                "line": line_number,
+                                "type": "invalid_json",
+                            }
+                        }
+                    )
 
         return out
 
@@ -969,10 +1267,24 @@ class OpenAIProvider[AgentT: _Agent](AzureOpenAIProvider[AgentT]):
     Requires `api_key` passed as a kwarg, or OPENAI_API_KEY set as an environment variable
     """
 
-    def __init__(self, model_name: str, **kwargs):
+    def __init__(
+        self,
+        model_name: str,
+        *,
+        request_budget=None,
+        require_request_budget=False,
+        retry_policy=None,
+        **kwargs,
+    ):
+        _Provider.__init__(self, model_name)
         self.model_name = model_name
+        self._configure_execution(
+            request_budget, require_request_budget, retry_policy, None
+        )
         self.authenticate()
+        kwargs.setdefault("max_retries", 0)
         self.llm = openai.AsyncOpenAI(**kwargs)
+        self.endpoint_fn = self.round_trip_increment(self.llm.chat.completions.create)
 
     def authenticate(self):
         pass

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agents"
-version = "0.4.4"
+version = "0.4.5"
 description = "Yet another langchain-esque package to use language agents and compose agent-systems"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,7 +27,9 @@ dependencies = [
 test = [
     "pytest",
     "pytest-asyncio",
+    "pytest-cov",
     "pytest-mock",
+    "httpx",
 ]
 
 dev = [
