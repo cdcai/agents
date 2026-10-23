@@ -214,7 +214,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         *,
         progress_max_items: int = DEFAULT_BATCH_PROGRESS_MAX_ITEMS,
         progress_renderer: BatchProgressRenderer | None = None,
-        poll_frequency: int = 60
+        poll_frequency: int = 60,
     ):
         self.batch_size = batch_size
         self.n_workers = n_workers
