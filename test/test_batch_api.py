@@ -196,7 +196,7 @@ async def test_batch_api(mocker: MockFixture):
     provider.llm = aoi
 
     # Set an artificially short timeout for testing
-    provider.batch_handler.api_timeout = 3
+    provider.batch_handler.poll_frequency = 3
 
     async with provider:
         ag = DummyAgent(provider=provider, batch="blah")

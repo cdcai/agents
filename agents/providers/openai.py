@@ -205,7 +205,7 @@ class OpenAIToolCall(_ToolCall):
 
 class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
     # The time in seconds to wait before checking if a batch has been completed
-    api_timeout: int = 30
+    poll_frequency: int
 
     def __init__(
         self,
@@ -214,6 +214,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         *,
         progress_max_items: int = DEFAULT_BATCH_PROGRESS_MAX_ITEMS,
         progress_renderer: BatchProgressRenderer | None = None,
+        poll_frequency: int = 60
     ):
         self.batch_size = batch_size
         self.n_workers = n_workers
@@ -226,6 +227,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         self._progress_renderer = progress_renderer
         self._progress_enabled = self.progress_max_items != 0
         self._progress_renderer_closed = False
+        self.poll_frequency = poll_frequency
 
     @property
     def batch_progress(self) -> BatchProgressState:
@@ -550,7 +552,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
             try:
                 batch_task = await self.provider.create_batch_task(
                     batch_file,
-                    timeout=self.api_timeout,
+                    timeout=self.poll_frequency,
                     status_callback=status_callback,
                 )
             except BatchPollingDeadlineExceeded as exc:
