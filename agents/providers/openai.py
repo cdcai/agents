@@ -108,6 +108,10 @@ BATCH_TRACKING_FAILED_STATUS = "tracking_failed"
 BatchStatusCallback = Callable[[Batch], None]
 
 
+class _BatchListCursor(TypedDict, total=False):
+    after: str
+
+
 def _request_error(
     result: dict, batch_id: str
 ) -> TerminalBatchRequestError | RetryableBatchRequestError:
@@ -996,8 +1000,6 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         self.batch_idx_lock = asyncio.Lock()
         self.endpoint_fn = self.query_batch_mode
         self.batch_q: asyncio.Queue[BatchRequestInput] = asyncio.Queue()
-        self.poll_q = asyncio.Queue()
-        self.file_q = asyncio.Queue()
         self.batch_out: dict[str, asyncio.Future[ChatCompletion]] = {}
         self.quiet = quiet
         if batch_handler is None and progress_max_items is not None:
@@ -1111,9 +1113,10 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         return await self.llm.batches.retrieve(batch_id)
 
     async def _list_batches_once(self, created_after: int, *, after: str | None = None):
+        cursor: _BatchListCursor = {"after": after} if after is not None else {}
         return await self.llm.batches.list(
             limit=100,
-            **({"after": after} if after is not None else {}),
+            **cursor,
             extra_query={
                 "$filter": f"created_at gt {created_after}",
                 "$orderby": "created_at asc",
