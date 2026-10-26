@@ -1,3 +1,4 @@
+import openai.types
 import asyncio
 import copy
 import inspect
@@ -5,6 +6,7 @@ import json
 import logging
 import math
 import os
+from asyncio.futures import Future
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -17,6 +19,8 @@ from typing import (
     TypedDict,
     cast,
 )
+
+import backoff
 
 try:
     import openai
@@ -35,7 +39,7 @@ from openai.types import (
     CompletionCreateParams,
     CompletionUsage,
     EmbeddingCreateParams,
-    FileObject,
+    FileObject, FileContent,
 )
 from openai.types.chat import (
     ChatCompletion,
@@ -206,6 +210,7 @@ class OpenAIToolCall(_ToolCall):
 class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
     # The time in seconds to wait before checking if a batch has been completed
     poll_frequency: int
+    tasks: list[asyncio.Task]
 
     def __init__(
         self,
@@ -221,6 +226,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         self.progress_max_items = validate_max_items(progress_max_items)
         self.batch_tasks = set()
         self.task = None
+        self.tasks = []
         self._closed = False
         self._close_task = None
         self._batch_tracker = BatchTracker()
@@ -228,12 +234,61 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         self._progress_enabled = self.progress_max_items != 0
         self._progress_renderer_closed = False
         self.poll_frequency = poll_frequency
+        self.send_batch_q : asyncio.Queue[tuple[IO[bytes], Future]] = asyncio.Queue()
 
     @property
     def batch_progress(self) -> BatchProgressState:
         """Return the latest provider-neutral batch progress snapshot."""
 
         return self._batch_tracker.snapshot()
+
+    async def send_batch(
+        self,
+        file_content: IO[bytes],
+    ) -> FileObject:
+        """
+        Send a batch file to OpenAI pending further processing.
+
+        :param file_content: serialized JSON payload to send to OpenAI
+        :param kwargs: Additional keyword arguments for the file upload (see OpenAI API documentation)
+
+        :return: An OpenAI File object representing the uploaded batch file
+        """
+        future = asyncio.get_running_loop().create_future()
+        await self.send_batch_q.put((file_content, future))
+        return await future
+
+    async def _send_batch_worker(self):
+        while True:
+            file_content, future = await self.send_batch_q.get()
+
+            try:
+                result = await self._send_batch_with_backoff(file_content)
+                if not future.done():
+                    future.set_result(result)
+            except Exception as exc:
+                if not future.done():
+                    future.set_exception(exc)
+            finally:
+                self.send_batch_q.task_done()
+
+    # TODO: Honor next_allowed_at in timeout errors
+    @backoff.on_exception(
+        backoff.expo,
+        openai.APITimeoutError,
+        max_tries=3,
+        logger=logger
+    )
+    async def _send_batch_with_backoff(self, file_content: IO[bytes]):
+        start = file_content.tell()
+
+        file_content.seek(start)
+
+        file = await self.provider._upload_batch_once(file_content)
+
+        logger.info(f"Created file [{file.id}]")
+
+        return file
 
     def register_provider(self, provider: "AzureOpenAIBatchProvider"):
         """
@@ -256,7 +311,8 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
 
         # Create a Semaphore to ensure only n_workers batches running concurrently
         self.lock = asyncio.Semaphore(self.n_workers)
-        self.task = asyncio.create_task(self._batcher(), name="OpenAIBatchHelper")
+        self.task = asyncio.create_task(self._batcher(), name="OpenAIBatchHelper-batcher")
+        self.tasks.append(asyncio.create_task(self._send_batch_worker(), name="OpenAIBatchHelper-send_batch"))
 
     @staticmethod
     def _batch_snapshot(batch: Batch) -> BatchSnapshot:
@@ -368,6 +424,13 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
     async def _close(self) -> None:
         try:
             await super().close()
+
+            for task in self.tasks:
+                task.cancel()
+
+            # TODO: If send_batch_q was not empty, cancel all queue members and wait for it to drain
+            await self.send_batch_q.join()
+            await asyncio.gather(*self.tasks, return_exceptions=True)
         finally:
             try:
                 self._cleanup_local_requests()
@@ -547,7 +610,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         try:
             # Close batch file after we're done with it
             with batch:
-                batch_file = await self.provider.send_batch(batch)
+                batch_file = await self.send_batch(batch)
             deadline_error = None
             try:
                 batch_task = await self.provider.create_batch_task(
@@ -982,9 +1045,10 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         self.batch_idx_lock = asyncio.Lock()
         self.endpoint_fn = self.query_batch_mode
         self.batch_q: asyncio.Queue[BatchRequestInput] = asyncio.Queue()
+        self.poll_q = asyncio.Queue()
+        self.file_q = asyncio.Queue()
         self.batch_out: dict[str, asyncio.Future[ChatCompletion]] = {}
         self.quiet = quiet
-
         if batch_handler is None and progress_max_items is not None:
             self.batch_handler = OpenAIBatchAPIHelper(
                 batch_size=batch_size,
@@ -1057,35 +1121,6 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
     @staticmethod
     def _serialize_request(task: BatchRequestInput) -> bytes:
         return (json.dumps(task) + "\n").encode("utf-8")
-
-    async def send_batch(
-        self,
-        file_content: IO[bytes],
-        **kwargs,
-    ) -> FileObject:
-        """
-        Send a batch file to OpenAI pending further processing.
-
-        :param file_content: serialized JSON payload to send to OpenAI
-        :param kwargs: Additional keyword arguments for the file upload (see OpenAI API documentation)
-
-        :return: An OpenAI File object representing the uploaded batch file
-        """
-        start = file_content.tell()
-
-        async def upload():
-            file_content.seek(start)
-            return await self.llm.files.create(
-                file=("batch_tasks.jsonl", file_content, "application/json"),
-                purpose="batch",
-                **kwargs,
-            )
-
-        file = await self._operation(upload)
-
-        logger.info(f"Created file [{file.id}]")
-
-        return file
 
     async def create_batch_task(
         self,
@@ -1235,6 +1270,14 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         self.round_trips = getattr(self, "round_trips", 0) + 1
 
         return results
+
+    async def _upload_batch_once(self, file_content: IO[bytes]) -> openai.types.FileObject:
+        file = await self.llm.files.create(
+            file=("batch_tasks.jsonl", file_content, "application/json"),
+            purpose="batch",
+        )
+
+        return file
 
     @staticmethod
     def _response_from_bytes(stream: bytes) -> list[dict]:
