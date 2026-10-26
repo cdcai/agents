@@ -384,10 +384,14 @@ class AllCallProcessor[AgentT: Agent, DataInputT](_Processor[AgentT, DataInputT]
         batch_size: int,
         n_retry: int = 5,
         max_concurrency: int | None = None,
-        **kwargs
+        **kwargs,
     ):
-        self.max_concurrency = max_concurrency if max_concurrency is not None else PROCESSOR_MAX_CONCURRENCY
-        
+        self.max_concurrency = (
+            max_concurrency
+            if max_concurrency is not None
+            else PROCESSOR_MAX_CONCURRENCY
+        )
+
         if self.max_concurrency < 1:
             raise ValueError("max_concurrency must be greater than or equal to 1!")
 
