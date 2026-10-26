@@ -1,7 +1,7 @@
 """Tests for OpenAI batch progress integration."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from io import BytesIO
 from types import SimpleNamespace
 from typing import Literal
@@ -153,9 +153,7 @@ async def test_batch_callback_tracks_openai_snapshots_and_request_counts():
         active = active_states[0].active[0]
         assert active.id == "batch_123"
         assert active.name == "nightly-run"
-        assert active.created_at == datetime.fromtimestamp(
-            1_756_742_400, tz=timezone.utc
-        )
+        assert active.created_at == datetime.fromtimestamp(1_756_742_400, tz=UTC)
         assert active.request_counts is not None
         assert active.request_counts.total == 10
         assert active.request_counts.completed == 2
@@ -293,6 +291,7 @@ async def test_default_renderer_uses_limit_and_quiet_setting():
     renderer_type.assert_called_once_with(max_items=4, disable=True)
     renderer.close.assert_called_once_with()
 
+
 def test_provider_forwards_progress_limit_only_to_default_helper():
     helper = Mock()
     progress = BatchProgressState(finished_counts={"completed": 2})
@@ -322,6 +321,7 @@ def test_provider_forwards_progress_limit_only_to_default_helper():
     helper_type.assert_called_once_with(
         batch_size=25,
         n_workers=3,
+        polling_strategy="retrieve",
         progress_max_items=4,
     )
     helper.register_provider.assert_called_once_with(provider)

@@ -1,4 +1,3 @@
-import openai.types
 import asyncio
 import copy
 import inspect
@@ -6,7 +5,6 @@ import json
 import logging
 import math
 import os
-from asyncio.futures import Future
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -20,7 +18,7 @@ from typing import (
     cast,
 )
 
-import backoff
+import openai.types
 
 try:
     import openai
@@ -39,7 +37,7 @@ from openai.types import (
     CompletionCreateParams,
     CompletionUsage,
     EmbeddingCreateParams,
-    FileObject, FileContent,
+    FileObject,
 )
 from openai.types.chat import (
     ChatCompletion,
@@ -71,6 +69,7 @@ from ..exceptions import (
 )
 from ..observability import LLMUsage, Observable
 from ..retries import RetryPolicy, retry_operation
+from ._batch_scheduler import BatchScheduler
 
 DEFAULT_BATCH_SIZE = 1000
 
@@ -207,7 +206,7 @@ class OpenAIToolCall(_ToolCall):
         return {"tool_call_id": id, "role": "tool", "content": response}
 
 
-class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
+class OpenAIBatchAPIHelper(BatchScheduler, _BatchAPIHelper["AzureOpenAIBatchProvider"]):
     # The time in seconds to wait before checking if a batch has been completed
     poll_frequency: int
     tasks: list[asyncio.Task]
@@ -220,6 +219,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         progress_max_items: int = DEFAULT_BATCH_PROGRESS_MAX_ITEMS,
         progress_renderer: BatchProgressRenderer | None = None,
         poll_frequency: int = 60,
+        polling_strategy: Literal["retrieve", "list"] = "retrieve",
     ):
         self.batch_size = batch_size
         self.n_workers = n_workers
@@ -234,61 +234,13 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         self._progress_enabled = self.progress_max_items != 0
         self._progress_renderer_closed = False
         self.poll_frequency = poll_frequency
-        self.send_batch_q : asyncio.Queue[tuple[IO[bytes], Future]] = asyncio.Queue()
+        self._init_scheduler(n_workers, polling_strategy)
 
     @property
     def batch_progress(self) -> BatchProgressState:
         """Return the latest provider-neutral batch progress snapshot."""
 
         return self._batch_tracker.snapshot()
-
-    async def send_batch(
-        self,
-        file_content: IO[bytes],
-    ) -> FileObject:
-        """
-        Send a batch file to OpenAI pending further processing.
-
-        :param file_content: serialized JSON payload to send to OpenAI
-        :param kwargs: Additional keyword arguments for the file upload (see OpenAI API documentation)
-
-        :return: An OpenAI File object representing the uploaded batch file
-        """
-        future = asyncio.get_running_loop().create_future()
-        await self.send_batch_q.put((file_content, future))
-        return await future
-
-    async def _send_batch_worker(self):
-        while True:
-            file_content, future = await self.send_batch_q.get()
-
-            try:
-                result = await self._send_batch_with_backoff(file_content)
-                if not future.done():
-                    future.set_result(result)
-            except Exception as exc:
-                if not future.done():
-                    future.set_exception(exc)
-            finally:
-                self.send_batch_q.task_done()
-
-    # TODO: Honor next_allowed_at in timeout errors
-    @backoff.on_exception(
-        backoff.expo,
-        openai.APITimeoutError,
-        max_tries=3,
-        logger=logger
-    )
-    async def _send_batch_with_backoff(self, file_content: IO[bytes]):
-        start = file_content.tell()
-
-        file_content.seek(start)
-
-        file = await self.provider._upload_batch_once(file_content)
-
-        logger.info(f"Created file [{file.id}]")
-
-        return file
 
     def register_provider(self, provider: "AzureOpenAIBatchProvider"):
         """
@@ -311,8 +263,10 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
 
         # Create a Semaphore to ensure only n_workers batches running concurrently
         self.lock = asyncio.Semaphore(self.n_workers)
-        self.task = asyncio.create_task(self._batcher(), name="OpenAIBatchHelper-batcher")
-        self.tasks.append(asyncio.create_task(self._send_batch_worker(), name="OpenAIBatchHelper-send_batch"))
+        self.task = asyncio.create_task(
+            self._batcher(), name="OpenAIBatchHelper-batcher"
+        )
+        self._start_scheduler()
 
     @staticmethod
     def _batch_snapshot(batch: Batch) -> BatchSnapshot:
@@ -425,12 +379,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         try:
             await super().close()
 
-            for task in self.tasks:
-                task.cancel()
-
-            # TODO: If send_batch_q was not empty, cancel all queue members and wait for it to drain
-            await self.send_batch_q.join()
-            await asyncio.gather(*self.tasks, return_exceptions=True)
+            await self._stop_scheduler()
         finally:
             try:
                 self._cleanup_local_requests()
@@ -610,7 +559,7 @@ class OpenAIBatchAPIHelper(_BatchAPIHelper["AzureOpenAIBatchProvider"]):
         try:
             # Close batch file after we're done with it
             with batch:
-                batch_file = await self.send_batch(batch)
+                batch_file = await self.provider.send_batch(batch)
             deadline_error = None
             try:
                 batch_task = await self.provider.create_batch_task(
@@ -1020,6 +969,7 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         interactive: bool = False,
         batch_size: int = DEFAULT_BATCH_SIZE,
         n_workers: int = 1,
+        polling_strategy: Literal["retrieve", "list"] = "retrieve",
         batch_handler: OpenAIBatchAPIHelper | None = None,
         progress_max_items: int | None = DEFAULT_BATCH_PROGRESS_MAX_ITEMS,
         quiet: bool = False,
@@ -1034,6 +984,7 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         :param bool interactive: Should the requests be run in interactive mode using EntraID credentials
         :param int batch_size: The maximum size of batches that should be sent to OpenAI at a time
         :param int n_workers: If `batch_handler` is not provided, the number of workers to run in parallel to process incoming requests (default: 1)
+        :param polling_strategy: Individual retrieval (default) or filtered, paginated list sweeps.
         :param OpenAIBatchAPIHelper batch_handler: (optional) An initialized batch handler which will be used to handle the inqueue of requests to send to openAI
         :param int | None progress_max_items: (default: 10) Maximum number of active batches to display individually. Zero disables the display.
         :param bool quiet: If True, suppresses batch progress output
@@ -1053,6 +1004,7 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
             self.batch_handler = OpenAIBatchAPIHelper(
                 batch_size=batch_size,
                 n_workers=n_workers,
+                polling_strategy=polling_strategy,
                 progress_max_items=progress_max_items,
             )
         elif batch_handler is not None and progress_max_items is None:
@@ -1081,7 +1033,13 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         try:
             if hasattr(self, "batch_handler") and self.batch_handler is not None:
                 # Cancel the batch processing task before closing its API client.
-                await self.batch_handler.close()
+                try:
+                    await self.batch_handler.close()
+                except asyncio.CancelledError:
+                    # The helper shares a shielded close task. Keep the SDK
+                    # transport available until its bounded remote cleanup ends.
+                    await self.batch_handler.close()
+                    raise
         finally:
             await super().close()
 
@@ -1122,6 +1080,9 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
     def _serialize_request(task: BatchRequestInput) -> bytes:
         return (json.dumps(task) + "\n").encode("utf-8")
 
+    async def send_batch(self, file_content: IO[bytes], **kwargs) -> FileObject:
+        return await self.batch_handler.send_batch(file_content, **kwargs)
+
     async def create_batch_task(
         self,
         batch_file: FileObject,
@@ -1130,98 +1091,45 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         polling_deadline: float | None = None,
         **kwargs,
     ) -> Batch:
-        """
-        Create a batch from an existing batch file object.
+        return await self.batch_handler.create_batch_task(
+            batch_file,
+            timeout=timeout,
+            status_callback=status_callback,
+            polling_deadline=polling_deadline,
+            **kwargs,
+        )
 
-        :param FileObject batch_file: An OpenAI File object representing the batch file
-        :param int timeout: polling timeout waiting for response
-        :param status_callback: Optional synchronous callback invoked with the created batch
-            and every subsequently retrieved batch state
-        :param kwargs: Additional keyword arguments for the batch creation
+    async def _create_batch_once(self, batch_file: FileObject, **kwargs) -> Batch:
+        return await self.llm.batches.create(
+            input_file_id=batch_file.id,
+            endpoint="/v1/chat/completions",
+            completion_window="24h",
+            **kwargs,
+        )
 
-        :return: The terminal OpenAI Batch object
-        """
-        if status_callback is None:
-            status_callback = _noop_batch_status_callback
+    async def _retrieve_batch_once(self, batch_id: str) -> Batch:
+        return await self.llm.batches.retrieve(batch_id)
 
-        try:
-            # A lost response to creation can leave a running remote batch.
-            # Do not automatically create a duplicate batch in that case.
-            batch = await self._operation(
-                lambda: self.llm.batches.create(
-                    input_file_id=batch_file.id,
-                    endpoint="/v1/chat/completions",
-                    completion_window="24h",
-                    **kwargs,
-                ),
-                retry=False,
-            )
-            logger.info(f"Executing batch task [{batch_file.id}] -> [{batch.id}]")
-        except Exception:
-            logger.error(f"Attempt to process batch {batch_file.id} failed!")
-            raise
+    async def _list_batches_once(self, created_after: int, *, after: str | None = None):
+        return await self.llm.batches.list(
+            limit=100,
+            **({"after": after} if after is not None else {}),
+            extra_query={
+                "$filter": f"created_at gt {created_after}",
+                "$orderby": "created_at asc",
+            },
+        )
 
-        try:
+    async def _cancel_batch_once(self, batch_id: str) -> Batch:
+        return await self.llm.batches.cancel(batch_id)
 
-            async def poll():
-                nonlocal batch
-                status_callback(batch)
-                while batch.status not in OPENAI_BATCH_TERMINAL_STATUSES:
-                    logger.info(f"Batch [{batch.id}] Status: {batch.status}")
-                    batch_id = batch.id
-                    batch = await self._operation(
-                        lambda batch_id=batch_id: self.llm.batches.retrieve(batch_id)
-                    )
-                    status_callback(batch)
-                    if batch.status not in OPENAI_BATCH_TERMINAL_STATUSES:
-                        await asyncio.sleep(timeout)
-
-            deadline = (
-                polling_deadline
-                if polling_deadline is not None
-                else getattr(self, "batch_polling_deadline", None)
-            )
-            if deadline is None:
-                await poll()
-            else:
-                deadline_context = asyncio.timeout(deadline)
-                try:
-                    async with deadline_context:
-                        await poll()
-                except TimeoutError as exc:
-                    if not deadline_context.expired():
-                        raise
-                    # This helper owns the whole batch. A single caller's agent
-                    # deadline only abandons its future and never reaches here.
-                    try:
-                        async with asyncio.timeout(5):
-                            cancelled = await self.llm.batches.cancel(batch.id)
-                            if isinstance(cancelled, Batch):
-                                batch = cancelled
-                            retrieved = await self.llm.batches.retrieve(batch.id)
-                            if isinstance(retrieved, Batch):
-                                batch = retrieved
-                    except Exception:  # noqa: BLE001 - preserve the original deadline
-                        logger.warning(
-                            "Unable to confirm remote batch state after polling deadline"
-                        )
-                    raise BatchPollingDeadlineExceeded(batch, deadline) from exc
-
-        except BatchPollingDeadlineExceeded:
-            raise
-        except (Exception, asyncio.CancelledError):
-            # Cancel the remote batch before terminating while preserving the error.
-            if batch.status not in OPENAI_BATCH_TERMINAL_STATUSES:
-                try:
-                    await self.llm.batches.cancel(batch.id)
-                except Exception:
-                    logger.exception(f"Error cancelling batch [{batch.id}]:")
-            logger.exception(f"Error processing batch [{batch.id}]!")
-            raise
-
-        return batch
+    async def _download_batch_once(self, file_id: str):
+        return await self.llm.files.content(file_id)
 
     async def get_batch_results(self, batch: Batch) -> list[dict]:
+        return await self.batch_handler.get_batch_results(batch)
+
+    async def _read_batch_results(self, batch: Batch, download) -> list[dict]:
         """
         Retrieve the results of a completed batch.
 
@@ -1246,9 +1154,7 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         results = []
         for file_id in file_ids:
             try:
-                result_stream = await self._operation(
-                    lambda file_id=file_id: self.llm.files.content(file_id)
-                )
+                result_stream = await download(file_id)
                 results.extend(
                     await asyncio.to_thread(
                         self._response_from_bytes, result_stream.content
@@ -1271,10 +1177,13 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
 
         return results
 
-    async def _upload_batch_once(self, file_content: IO[bytes]) -> openai.types.FileObject:
+    async def _upload_batch_once(
+        self, file_content: IO[bytes], **kwargs
+    ) -> openai.types.FileObject:
         file = await self.llm.files.create(
             file=("batch_tasks.jsonl", file_content, "application/json"),
             purpose="batch",
+            **kwargs,
         )
 
         return file
