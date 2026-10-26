@@ -802,8 +802,20 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
         )
         return await replacement if inspect.isawaitable(replacement) else replacement
 
+    @staticmethod
+    def _normalize_messages(prompt):
+        """Render typed tool results for transport without changing agent history."""
+        return [
+            {**message, "content": message["content"].model_dump_json()}
+            if message.get("role") == "tool"
+            and isinstance(message.get("content"), BaseModel)
+            else message
+            for message in prompt
+        ]
+
     async def _prepare_request(self, ag, prompt, kwargs, *, allow_rebuild=True):
-        """Check the fully rendered request and offer one explicit rebuild."""
+        """Render transport messages, check their budget, and offer one rebuild."""
+        prompt = self._normalize_messages(prompt)
         budget = getattr(ag, "request_budget", None) or getattr(
             self, "request_budget", None
         )
@@ -821,6 +833,7 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
             prompt = await self._rebuild_context(ag, prompt, error)
             if prompt is None:
                 raise
+            prompt = self._normalize_messages(prompt)
             estimate = check_request_budget(
                 {"model": self.model_name, **kwargs, "messages": prompt}, budget
             )
@@ -928,7 +941,7 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
             out.finish_reason = "tool_calls"
             # Append GPT response to next payload
             # NOTE: This has to come before the next step of parsing
-            ag.tool_res_payload.append(out.message.model_dump())
+            ag.tool_res_payload.append(out.message.model_dump(mode="json"))
 
         logger.debug(f"Received response: {out.message.content}")
 
@@ -1185,7 +1198,8 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         self, file_content: IO[bytes], **kwargs
     ) -> openai.types.FileObject:
         kwargs.setdefault(
-            "expires_after", {"anchor": "created_at", "seconds": DEFAULT_BATCH_FILE_EXPIRY}
+            "expires_after",
+            {"anchor": "created_at", "seconds": DEFAULT_BATCH_FILE_EXPIRY},
         )
         file = await self.llm.files.create(
             file=("batch_tasks.jsonl", file_content, "application/json"),
