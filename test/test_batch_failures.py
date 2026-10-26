@@ -55,6 +55,13 @@ def file_provider(batch):
     provider = object.__new__(AzureOpenAIBatchProvider)
     provider.retry_policy = RetryPolicy(max_attempts=2, initial_delay=0)
     provider.llm = SimpleNamespace(files=SimpleNamespace(content=AsyncMock()))
+    provider.quiet = True
+    provider.batch_q = asyncio.Queue()
+    provider.batch_out = {}
+    from agents.providers.openai import OpenAIBatchAPIHelper
+
+    provider.batch_handler = OpenAIBatchAPIHelper(batch_size=1, progress_max_items=0)
+    provider.batch_handler.register_provider(provider)
     return provider
 
 

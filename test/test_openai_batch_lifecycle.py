@@ -5,7 +5,7 @@ Test OpenAI Batch API lifecycle handling.
 import asyncio
 from types import SimpleNamespace
 from typing import Literal
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from openai.types import Batch, FileObject
@@ -15,8 +15,8 @@ from agents.providers.openai import (
     OPENAI_BATCH_SUCCESS_STATUSES,
     OPENAI_BATCH_TERMINAL_STATUSES,
     AzureOpenAIBatchProvider,
+    OpenAIBatchAPIHelper,
 )
-
 
 BatchStatus = Literal[
     "validating",
@@ -58,6 +58,11 @@ def make_batch_file() -> FileObject:
 def make_provider(batches) -> AzureOpenAIBatchProvider:
     provider = object.__new__(AzureOpenAIBatchProvider)
     provider.llm = SimpleNamespace(batches=batches)
+    provider.quiet = True
+    provider.batch_q = asyncio.Queue()
+    provider.batch_out = {}
+    provider.batch_handler = OpenAIBatchAPIHelper(batch_size=1, progress_max_items=0)
+    provider.batch_handler.register_provider(provider)
     return provider
 
 
@@ -96,12 +101,9 @@ async def test_create_batch_task_reports_updates_and_stops_at_terminal_status(
     provider = make_provider(batches)
     callback = Mock()
 
-    with patch(
-        "agents.providers.openai.asyncio.sleep", new_callable=AsyncMock
-    ) as sleep:
-        result = await provider.create_batch_task(
-            make_batch_file(), timeout=30, status_callback=callback
-        )
+    result = await provider.create_batch_task(
+        make_batch_file(), timeout=0, status_callback=callback
+    )
 
     assert result.status == terminal_status
     assert [call.args[0].status for call in callback.call_args_list] == [
@@ -110,7 +112,6 @@ async def test_create_batch_task_reports_updates_and_stops_at_terminal_status(
         terminal_status,
     ]
     assert batches.retrieve.await_count == 2
-    sleep.assert_awaited_once_with(30)
     batches.cancel.assert_not_awaited()
 
 
@@ -131,22 +132,20 @@ async def test_create_batch_task_accepts_no_status_callback():
 
 
 @pytest.mark.asyncio
-async def test_callback_error_is_not_masked_by_remote_cancellation_error():
+async def test_callback_error_is_isolated_from_polling():
     callback_error = RuntimeError("callback failed")
     batches = SimpleNamespace(
         create=AsyncMock(return_value=make_batch("in_progress")),
-        retrieve=AsyncMock(),
+        retrieve=AsyncMock(return_value=make_batch("completed")),
         cancel=AsyncMock(side_effect=ValueError("cancel failed")),
     )
     provider = make_provider(batches)
 
-    with pytest.raises(RuntimeError) as exc_info:
-        await provider.create_batch_task(
-            make_batch_file(), status_callback=Mock(side_effect=callback_error)
-        )
-
-    assert exc_info.value is callback_error
-    batches.cancel.assert_awaited_once_with("batch_123")
+    result = await provider.create_batch_task(
+        make_batch_file(), status_callback=Mock(side_effect=callback_error)
+    )
+    assert result.status == "completed"
+    batches.cancel.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -183,7 +182,7 @@ async def test_cancellation_during_remote_cleanup_takes_precedence():
 
     batches = SimpleNamespace(
         create=AsyncMock(return_value=make_batch("in_progress")),
-        retrieve=AsyncMock(),
+        retrieve=AsyncMock(side_effect=RuntimeError("poll failed")),
         cancel=AsyncMock(side_effect=cancel),
     )
     provider = make_provider(batches)

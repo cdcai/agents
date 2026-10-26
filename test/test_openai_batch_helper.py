@@ -173,7 +173,7 @@ def make_remote_cancel_provider():
     provider.batch_q = asyncio.Queue()
     provider.batch_out = {}
     provider.llm = SimpleNamespace(batches=batches)
-    provider.send_batch = AsyncMock(return_value=make_batch_file())
+    provider._upload_batch_once = AsyncMock(return_value=make_batch_file())
     provider.get_batch_results = AsyncMock()
     events = SimpleNamespace(
         retrieve_started=retrieve_started,
@@ -304,6 +304,7 @@ async def test_close_during_batch_collection_accounts_for_first_request(monkeypa
     provider.batch_out["task-1"] = future
     helper = OpenAIBatchAPIHelper(batch_size=2)
     helper.timeout = 60
+    provider.batch_handler = helper
     helper.register_provider(provider)
 
     try:
@@ -327,6 +328,7 @@ async def test_close_during_semaphore_wait_cancels_unsubmitted_requests():
     future = asyncio.get_running_loop().create_future()
     provider.batch_out["task-1"] = future
     helper = OpenAIBatchAPIHelper(batch_size=1)
+    provider.batch_handler = helper
     helper.register_provider(provider)
     semaphore = BlockingSemaphore()
     helper.lock = semaphore
@@ -357,6 +359,7 @@ async def test_close_awaits_in_flight_handlers_and_is_repeatable():
     future = asyncio.get_running_loop().create_future()
     provider.batch_out["task-1"] = future
     helper = OpenAIBatchAPIHelper(batch_size=1)
+    provider.batch_handler = helper
     helper.register_provider(provider)
 
     try:
@@ -381,6 +384,7 @@ async def test_concurrent_close_does_not_interrupt_remote_cancellation():
     future = asyncio.get_running_loop().create_future()
     provider.batch_out["task-1"] = future
     helper = OpenAIBatchAPIHelper(batch_size=1)
+    provider.batch_handler = helper
     helper.register_provider(provider)
 
     try:
@@ -411,6 +415,7 @@ async def test_cancelled_close_waiter_still_cleans_local_requests():
     queued = asyncio.get_running_loop().create_future()
     provider.batch_out.update({"task-1": in_flight, "task-2": queued})
     helper = OpenAIBatchAPIHelper(batch_size=1)
+    provider.batch_handler = helper
     helper.register_provider(provider)
 
     try:
@@ -448,6 +453,7 @@ async def test_close_drains_queued_requests_and_guards_registration():
     }
     provider.batch_out.update(futures)
     helper = OpenAIBatchAPIHelper(batch_size=2)
+    provider.batch_handler = helper
     helper.register_provider(provider)
 
     try:
@@ -487,6 +493,7 @@ async def test_batcher_splits_requests_before_jsonl_file_exceeds_limit(
     provider.batch_out.update(futures)
     helper = OpenAIBatchAPIHelper(batch_size=len(requests))
     helper.timeout = 0.01
+    provider.batch_handler = helper
     helper.register_provider(provider)
 
     try:
@@ -528,6 +535,7 @@ async def test_batcher_rejects_oversized_request_and_processes_next(monkeypatch)
     )
     helper = OpenAIBatchAPIHelper(batch_size=1)
     helper.timeout = 0.01
+    provider.batch_handler = helper
     helper.register_provider(provider)
 
     try:
@@ -684,7 +692,9 @@ async def test_provider_init_failure_does_not_register_helper():
         ),
         pytest.raises(RuntimeError, match="authentication failed"),
     ):
-        AzureOpenAIBatchProvider("gpt-4o", batch_handler=helper, progress_max_items=None, quiet=True)
+        AzureOpenAIBatchProvider(
+            "gpt-4o", batch_handler=helper, progress_max_items=None, quiet=True
+        )
 
     assert helper.task is None
     assert helper.batch_tasks == set()

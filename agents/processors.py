@@ -15,6 +15,9 @@ from .retries import is_retryable_exception
 
 logger = logging.getLogger(__name__)
 
+# pls don't try higher than this
+PROCESSOR_MAX_CONCURRENCY = 1_000_000
+
 type Placeholder = str | tuple[str, ...] | dict[str, Any]
 
 
@@ -373,6 +376,27 @@ class AllCallProcessor[AgentT: Agent, DataInputT](_Processor[AgentT, DataInputT]
     The main user-facing method after init is :func:`process()`
     """
 
+    def __init__(
+        self,
+        data: DataInputT,
+        agent_class: type[AgentT],
+        provider: _Provider[AgentT],
+        batch_size: int,
+        n_retry: int = 5,
+        max_concurrency: int | None = None,
+        **kwargs,
+    ):
+        self.max_concurrency = (
+            max_concurrency
+            if max_concurrency is not None
+            else PROCESSOR_MAX_CONCURRENCY
+        )
+
+        if self.max_concurrency < 1:
+            raise ValueError("max_concurrency must be greater than or equal to 1!")
+
+        super().__init__(data, agent_class, provider, batch_size, n_retry, **kwargs)
+
     async def process(self) -> list[Any]:
         """
         Process all samples from input data using language agents.
@@ -386,19 +410,17 @@ class AllCallProcessor[AgentT: Agent, DataInputT](_Processor[AgentT, DataInputT]
         self.pbar = tqdm.tqdm(
             total=self.in_q.qsize(), desc="Batch Processing", unit="Batch"
         )
-        workers = []
+
+        workers = [
+            asyncio.create_task(
+                self._process_worker(),
+                name=f"batch-worker-{i}",
+            )
+            for i in range(min(self.max_concurrency, self.in_q.qsize()))
+        ]
 
         try:
-            while not self.in_q.empty():
-                for idx, retries_left, agent in self.dequeue(self.in_q):
-                    workers.append(
-                        asyncio.create_task(
-                            self._agent_handler(agent, idx, retries_left),
-                            name=f"batch-worker-{idx}",
-                        )
-                    )
-                await asyncio.gather(*workers)
-                workers.clear()
+            await self.in_q.join()
         finally:
             for worker in workers:
                 worker.cancel()
@@ -418,6 +440,15 @@ class AllCallProcessor[AgentT: Agent, DataInputT](_Processor[AgentT, DataInputT]
         if self.error_tasks and self.error_tasks == len(out):
             raise RuntimeError("No agents were successful! Check the logs.")
         return out
+
+    async def _process_worker(self):
+        while True:
+            idx, retries_left, agent = await self.in_q.get()
+
+            try:
+                await self._agent_handler(agent, idx, retries_left)
+            finally:
+                self.in_q.task_done()
 
     async def _agent_handler(self, agent: AgentT, id: int, retry_left: int) -> None:
         """

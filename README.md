@@ -67,6 +67,52 @@ The latest immutable state is available as `provider.batch_progress`. Alternate
 displays can implement `BatchProgressRenderer` and be supplied to an
 `OpenAIBatchAPIHelper`; configure `progress_max_items` on that custom helper.
 
+### Batch operation scheduling
+
+Each `OpenAIBatchAPIHelper` runs one upload worker, one creation worker, one
+result-download worker, and one status coordinator. Each operation queue holds
+up to `max(1, 2 * n_workers)` jobs; `n_workers` separately limits concurrent batch
+lifecycles. The provider owns authentication, the SDK client, response parsing,
+and single-attempt API calls. The helper owns queues, retries, polling, and
+shutdown. Coordination is local to a provider/helper instance; it does not
+coordinate other processes or instances.
+
+Status checks use individual retrieval by default. Opt into Azure's
+[filtered batch listing](https://learn.microsoft.com/azure/ai-services/openai/how-to/batch)
+with `AzureOpenAIBatchProvider(..., polling_strategy="list")`. Each sweep starts
+with a fresh cursor, filters from one second before the oldest tracked batch,
+and reads at most ten pages of 100 items, including terminal states. Missing IDs
+are retrieved individually. An explicit unsupported-filter response switches
+the instance to retrieval and logs a warning once.
+
+For a custom helper, configure polling on the helper itself:
+
+```python
+helper = OpenAIBatchAPIHelper(
+    batch_size=1000, n_workers=4, poll_frequency=60,
+    polling_strategy="list", progress_max_items=10,
+)
+provider = AzureOpenAIBatchProvider(
+    "gpt-4o-batch", batch_handler=helper, progress_max_items=None,
+)
+```
+
+The provider's `RetryPolicy` bounds upload, download, and polling retries.
+Cooldowns honor `retry-after-ms` and `Retry-After`; otherwise they use capped
+exponential backoff with jitter. A cooldown also delays the next queued job
+after retry exhaustion. Creation always makes a single attempt to avoid
+creating duplicate remote work after an ambiguous response.
+
+`send_batch()` borrows its stream until completion and rewinds to its initial
+offset for every attempt. Cancelling it waits until execution releases the
+stream. `send_batch()` and `create_batch_task()` forward additional SDK keyword
+arguments. Status callback failures are logged without stopping polling.
+Cancelling an individual `query_batch_mode()` caller abandons only that result;
+cancelling a batch lifecycle cancels the remote batch. Polling deadlines attempt
+bounded remote cancellation and recover available partial results. Closing the
+provider rejects new work and settles helper work and progress rendering before
+closing the SDK transport.
+
 ### Request budgets and elapsed deadlines
 
 Providers can check the complete rendered request before a network submission,
