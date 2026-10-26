@@ -9,7 +9,7 @@ on:
       - .github/workflows/test.yaml
   push:
     branches:
-      - main
+      - master
     paths:
       - '**.py'
       - pyproject.toml

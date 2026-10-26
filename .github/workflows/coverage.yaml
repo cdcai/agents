@@ -9,7 +9,7 @@ on:
       - .github/workflows/coverage.yaml
   push:
     branches:
-      - main
+      - master
     paths:
       - '**.py'
       - pyproject.toml
@@ -38,7 +38,7 @@ jobs:
         python -m pip install ".[test]"
 
     - name: Run tests with pytest
-      run: python -m pytest . --cov --cov-report xml:main.xml
+      run: python -m pytest . --cov --cov-report xml:master.xml
 
     # - name: Upload results to Codecov
     #   uses: codecov/codecov-action@v5
@@ -50,4 +50,4 @@ jobs:
       with:
         name: coverage
         path: |
-          main.xml
+          master.xml
