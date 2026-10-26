@@ -72,7 +72,8 @@ from ..retries import RetryPolicy, retry_operation
 from ._batch_scheduler import BatchScheduler
 
 DEFAULT_BATCH_SIZE = 1000
-
+# Default 30d expiry to avoid 500 file limit
+DEFAULT_BATCH_FILE_EXPIRY = 30 * 24 * 60 * 60
 # Maximum size in bytes for the JSONL payload
 # for batch tasks (any larger will raise errors from the API)
 MAX_BATCH_FILE_SIZE = 200_000_000
@@ -1183,6 +1184,9 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
     async def _upload_batch_once(
         self, file_content: IO[bytes], **kwargs
     ) -> openai.types.FileObject:
+        kwargs.setdefault(
+            "expires_after", {"anchor": "created_at", "seconds": DEFAULT_BATCH_FILE_EXPIRY}
+        )
         file = await self.llm.files.create(
             file=("batch_tasks.jsonl", file_content, "application/json"),
             purpose="batch",
