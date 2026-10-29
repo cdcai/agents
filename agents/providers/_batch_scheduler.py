@@ -304,9 +304,26 @@ class BatchScheduler:
                 ) from exc
         except BatchPollingDeadlineExceeded:
             raise
-        except (Exception, asyncio.CancelledError):
+        except asyncio.CancelledError:
             await self._unregister(batch.id, registration)
             await self._cleanup_remote(registration)
+            raise
+        except Exception as exc:
+            await self._unregister(batch.id, registration)
+            # Polling failure does not establish that remote execution failed.
+            reconciled = await self._cleanup_remote(registration, reconcile=True)
+            if reconciled:
+                self._notify(registration, registration.batch)
+                return registration.batch
+            if isinstance(exc, AgentError):
+                exc.batch_id = batch.id
+                exc.remote_outcome_unknown = True
+                exc.details = {
+                    "batch_id": batch.id,
+                    "batch_status": registration.batch.status,
+                    "remote_outcome_unknown": True,
+                    "cause": exc.details,
+                }
             raise
         finally:
             await self._unregister(batch.id, registration)
@@ -323,11 +340,28 @@ class BatchScheduler:
         elif not registration.future.cancelled():
             registration.future.exception()
 
-    async def _cleanup_remote(self, registration, *, retrieve=False):
+    async def _cleanup_remote(self, registration, *, retrieve=False, reconcile=False):
         if registration.batch.status in TERMINAL:
-            return
+            return True
         try:
             async with asyncio.timeout(5):
+                if reconcile:
+                    try:
+                        batch = await self._request(
+                            "polling",
+                            lambda: self.provider._retrieve_batch_once(
+                                registration.batch.id
+                            ),
+                        )
+                        if getattr(batch, "id", None) == registration.batch.id:
+                            registration.batch = batch
+                        if registration.batch.status in TERMINAL:
+                            return True
+                    except Exception:  # noqa: BLE001 - best-effort reconciliation
+                        logger.warning(
+                            "Unable to reconcile batch [%s] before cleanup",
+                            registration.batch.id,
+                        )
                 batch = await self.provider._cancel_batch_once(registration.batch.id)
                 if getattr(batch, "id", None) == registration.batch.id:
                     registration.batch = batch
@@ -404,14 +438,17 @@ class BatchScheduler:
                     if not page.has_more or not page.data:
                         break
                     after = page.data[-1].id
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - fall back to known IDs
                 if self._unsupported_filter(exc.__cause__ or exc):
                     logger.warning(
                         "Azure batch list filter unsupported; using individual retrieval"
                     )
                     self.polling_strategy = "retrieve"
                 else:
-                    raise
+                    logger.warning(
+                        "Batch list polling failed; retrieving %s known batch IDs",
+                        len(unresolved),
+                    )
         for batch_id, registration in unresolved.items():
             if self._closed:
                 return

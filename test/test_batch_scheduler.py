@@ -320,7 +320,8 @@ async def test_polling_retry_budget_and_coordinator_survives_failure():
     p.llm.batches.retrieve.side_effect = RetryableAgentError("busy")
     with pytest.raises(RetryableAgentError):
         await p.create_batch_task(make_batch_file())
-    assert p.llm.batches.retrieve.await_count == 2
+    # One bounded polling budget, then one bounded reconciliation budget.
+    assert p.llm.batches.retrieve.await_count == 4
     p.llm.batches.retrieve.side_effect = None
     p.llm.batches.retrieve.return_value = make_batch()
     await p.create_batch_task(make_batch_file())
@@ -501,3 +502,41 @@ async def test_cancelled_provider_close_keeps_transport_open_until_helper_finish
     with pytest.raises(asyncio.CancelledError):
         await lifecycle
     p.llm.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_exhausted_list_polling_falls_back_to_known_id_without_cancellation():
+    p = provider(strategy="list", attempts=2)
+    p.llm.batches.list.side_effect = rate_limit({})
+    result = await p.create_batch_task(make_batch_file())
+    assert result.status == "completed"
+    assert p.llm.batches.list.await_count == 2
+    p.llm.batches.retrieve.assert_awaited_once_with("batch_123")
+    p.llm.batches.create.assert_awaited_once()
+    p.llm.batches.cancel.assert_not_awaited()
+    assert p.batch_handler.polling_strategy == "list"
+
+
+@pytest.mark.asyncio
+async def test_polling_failure_reconciles_completed_batch_before_cancellation():
+    p = provider(attempts=1)
+    p.llm.batches.retrieve.side_effect = [rate_limit({}), make_batch()]
+    result = await p.create_batch_task(make_batch_file())
+    assert result.status == "completed"
+    assert p.llm.batches.retrieve.await_count == 2
+    p.llm.batches.cancel.assert_not_awaited()
+    p.llm.batches.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_exhausted_polling_preserves_remote_identity_and_original_cause():
+    p = provider(attempts=1)
+    p.llm.batches.retrieve.side_effect = rate_limit({})
+    with pytest.raises(RetryableAgentError) as failure:
+        await p.create_batch_task(make_batch_file())
+    assert failure.value.batch_id == "batch_123"
+    assert failure.value.details["batch_status"] == "cancelling"
+    assert failure.value.remote_outcome_unknown
+    assert isinstance(failure.value.__cause__, openai.RateLimitError)
+    p.llm.batches.cancel.assert_awaited_once()
+    p.llm.batches.create.assert_awaited_once()
