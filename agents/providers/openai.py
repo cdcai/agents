@@ -915,7 +915,11 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
             )
 
         try:
-            res = await self._operation(request)
+            res = (
+                await request()
+                if self.mode == "batch"
+                else await self._operation(request)
+            )
         except ContextLengthExceededError as error:
             rebuilt = await self._rebuild_context(ag, prompt, error)
             if rebuilt is None or rebuilt == prompt:
@@ -923,7 +927,11 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
             prompt = await self._prepare_request(
                 ag, rebuilt, kwargs, allow_rebuild=False
             )
-            res = await self._operation(request)
+            res = (
+                await request()
+                if self.mode == "batch"
+                else await self._operation(request)
+            )
 
         out = res.choices[0]
 

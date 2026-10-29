@@ -59,3 +59,54 @@ async def test_local_operation_deadline_exposes_unknown_remote_outcome():
     assert failure.value.code == "retry_deadline_exceeded"
     assert failure.value.remote_outcome_unknown
     operation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_prompt_creation_timeout_never_requeues_batch():
+    import asyncio
+    from types import SimpleNamespace
+
+    p = provider()
+    p.model_name = "synthetic"
+    p.request_budget = None
+    p.batch_idx = 1
+    p.batch_idx_lock = asyncio.Lock()
+    p.endpoint_fn = p.query_batch_mode
+    p.llm.batches.create.side_effect = openai.APITimeoutError(
+        request=httpx.Request("POST", "https://example.test")
+    )
+    with pytest.raises(RetryableAgentError):
+        await p.prompt_agent(
+            SimpleNamespace(record_request=lambda request: None),
+            [{"role": "user", "content": "synthetic"}],
+        )
+    p.llm.files.create.assert_awaited_once()
+    p.llm.batches.create.assert_awaited_once()
+    assert p.batch_idx == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_context_rebuild_does_not_retry_rebuilt_queue_call():
+    from types import SimpleNamespace
+
+    from agents.exceptions import ContextLengthExceededError
+
+    p = provider()
+    p.model_name = "synthetic"
+    p.request_budget = None
+    p.endpoint_fn = AsyncMock(
+        side_effect=[
+            ContextLengthExceededError("context"),
+            RetryableAgentError("tracking lost"),
+        ]
+    )
+    p._rebuild_context = AsyncMock(
+        return_value=[{"role": "user", "content": "rebuilt"}]
+    )
+    with pytest.raises(RetryableAgentError):
+        await p.prompt_agent(
+            SimpleNamespace(record_request=lambda request: None),
+            [{"role": "user", "content": "synthetic"}],
+        )
+    assert p.endpoint_fn.await_count == 2
+    p._rebuild_context.assert_awaited_once()
