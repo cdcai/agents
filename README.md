@@ -103,6 +103,33 @@ exponential backoff with jitter. A cooldown also delays the next queued job
 after retry exhaustion. Creation always makes a single attempt to avoid
 creating duplicate remote work after an ambiguous response.
 
+When list polling exhausts its retry budget, the helper retrieves unresolved
+batch IDs individually. Before cancelling after a polling failure, it makes one
+final retrieval with the same retry policy, within a five-second cleanup window.
+A terminal response is returned for result processing; an unresolved tracking
+error retains the batch ID, last status, and original cause.
+
+Result retrieval uses its own `RetryPolicy` budget across metadata refreshes and
+file downloads. Each pass downloads a file at most once, retaining readable
+sibling files and previously recovered rows. Transient download failures, HTTP
+404s for known result files, and fewer rows than terminal request counts trigger
+bounded recovery against the existing batch ID. Recovery never uploads or
+creates a new batch. Malformed rows and terminal request errors are not replayed.
+If recovery exhausts its budget, readable results still resolve normally; affected
+requests receive `batch_result_retrieval_failed` with batch/file diagnostics,
+instead of an unexplained missing-result error. These errors remain operation
+scoped, so processor retries cannot repeat remote model work.
+
+Use `RetryPolicy(elapsed_time_budget=120)` to bound the entire result recovery,
+including downloads, metadata requests, queue waits, and backoff. Without an
+elapsed budget, attempt counts are bounded and each SDK call uses the configured
+SDK timeout. For longer outages, retain exception batch IDs (or the uploaded
+`input_file_id` after an ambiguous creation) for later reconciliation. Recovery
+state is local to the running helper; it is not persisted across process restarts.
+Normalized SDK errors preserve `status_code`, `request_id`, and
+`remote_outcome_unknown`. File-read warnings include these identifiers without
+logging result payloads.
+
 `send_batch()` borrows its stream until completion and rewinds to its initial
 offset for every attempt. Cancelling it waits until execution releases the
 stream. `send_batch()` and `create_batch_task()` forward additional SDK keyword
