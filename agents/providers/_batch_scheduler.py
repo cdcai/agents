@@ -299,7 +299,7 @@ class BatchScheduler:
                 if not deadline_context.expired():
                     raise
                 await self._unregister(batch.id, registration)
-                await self._cleanup_remote(registration, retrieve=True)
+                await self._cleanup_remote(registration, retrieve=True, cancel=False)
                 raise BatchPollingDeadlineExceeded(
                     registration.batch, deadline
                 ) from exc
@@ -311,11 +311,6 @@ class BatchScheduler:
             raise
         except Exception as exc:
             await self._unregister(batch.id, registration)
-            # Polling failure does not establish that remote execution failed.
-            reconciled = await self._cleanup_remote(registration, reconcile=True)
-            if reconciled:
-                self._notify(registration, registration.batch)
-                return registration.batch
             if isinstance(exc, AgentError):
                 exc.batch_id = batch.id
                 exc.remote_outcome_unknown = True
@@ -341,31 +336,17 @@ class BatchScheduler:
         elif not registration.future.cancelled():
             registration.future.exception()
 
-    async def _cleanup_remote(self, registration, *, retrieve=False, reconcile=False):
+    async def _cleanup_remote(self, registration, *, retrieve=False, cancel=True):
         if registration.batch.status in TERMINAL:
             return True
         try:
             async with asyncio.timeout(5):
-                if reconcile:
-                    try:
-                        batch = await self._request(
-                            "polling",
-                            lambda: self.provider._retrieve_batch_once(
-                                registration.batch.id
-                            ),
-                        )
-                        if getattr(batch, "id", None) == registration.batch.id:
-                            registration.batch = batch
-                        if registration.batch.status in TERMINAL:
-                            return True
-                    except Exception:  # noqa: BLE001 - best-effort reconciliation
-                        logger.warning(
-                            "Unable to reconcile batch [%s] before cleanup",
-                            registration.batch.id,
-                        )
-                batch = await self.provider._cancel_batch_once(registration.batch.id)
-                if getattr(batch, "id", None) == registration.batch.id:
-                    registration.batch = batch
+                if cancel:
+                    batch = await self.provider._cancel_batch_once(
+                        registration.batch.id
+                    )
+                    if getattr(batch, "id", None) == registration.batch.id:
+                        registration.batch = batch
                 if retrieve:
                     batch = await self.provider._retrieve_batch_once(
                         registration.batch.id
@@ -468,7 +449,17 @@ class BatchScheduler:
                     self._notify(registration, batch)
             except Exception as exc:  # noqa: BLE001 - isolate independent jobs
                 if not registration.future.done():
-                    registration.future.set_exception(exc)
+                    if is_retryable_exception(exc) or getattr(
+                        exc, "remote_outcome_unknown", False
+                    ):
+                        # Retain known work during observation loss. The lifecycle's
+                        # deadline bounds tracking; the interval prevents busy polling.
+                        registration.next_check = time.monotonic() + max(
+                            1, registration.interval
+                        )
+                        logger.warning("Batch [%s] temporarily unobservable", batch_id)
+                    else:
+                        registration.future.set_exception(exc)
 
     async def _poll_coordinator(self):
         while not self._closed:

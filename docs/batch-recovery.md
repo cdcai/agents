@@ -37,10 +37,16 @@ after retry exhaustion. Creation always makes a single attempt to avoid
 creating duplicate remote work after an ambiguous response.
 
 When list polling exhausts its retry budget, the helper retrieves unresolved
-batch IDs individually. Before cancelling after a polling failure, it makes one
-final retrieval with the same retry policy, within a five-second cleanup window.
-A terminal response is returned for result processing; an unresolved tracking
-error retains the batch ID, last status, and original cause.
+batch IDs individually. Transient retrieval failures retain registrations and
+wait at least one second before another observation cycle. Set
+`batch_polling_deadline` to bound the total tracking duration. Without a deadline,
+tracking continues until remote completion or explicit cancellation. Permanent
+observation failures preserve the batch ID and last status without cancelling
+remote work.
+
+Batch request queueing has no enclosing retry or operation timeout: uploads,
+creation, polling, and retrieval own their individual budgets. This also applies
+after an explicit context rebuild.
 
 ## Result recovery
 
@@ -72,7 +78,7 @@ offset for every attempt. Cancelling it waits until execution releases the
 stream. `send_batch()` and `create_batch_task()` forward additional SDK keyword
 arguments. Status callback failures are logged without stopping polling.
 Cancelling an individual `query_batch_mode()` caller abandons only that result;
-cancelling a batch lifecycle cancels the remote batch. Polling deadlines attempt
-bounded remote cancellation and recover available partial results. Closing the
+cancelling a batch lifecycle cancels the remote batch. Polling deadlines refresh metadata within a bounded cleanup window and recover
+available partial results without cancelling remote work. Closing the
 provider rejects new work and settles helper work and progress rendering before
 closing the SDK transport.
