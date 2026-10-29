@@ -221,7 +221,7 @@ async def test_polling_deadline_preserves_available_successes_and_does_not_resub
     )
     assert provider.batch_out["missing"].exception().remote_outcome_unknown
     provider.llm.batches.create.assert_awaited_once()
-    provider.llm.batches.cancel.assert_awaited_once()
+    provider.llm.batches.cancel.assert_not_awaited()
 
 
 @pytest.mark.asyncio

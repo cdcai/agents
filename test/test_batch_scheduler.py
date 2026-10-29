@@ -318,9 +318,13 @@ async def test_cancel_single_request_does_not_cancel_remote_batch():
 async def test_polling_retry_budget_and_coordinator_survives_failure():
     p = provider(attempts=2)
     p.llm.batches.retrieve.side_effect = RetryableAgentError("busy")
-    with pytest.raises(RetryableAgentError):
-        await p.create_batch_task(make_batch_file())
-    assert p.llm.batches.retrieve.await_count == 2
+    from agents.exceptions import BatchPollingDeadlineExceeded
+
+    with pytest.raises(BatchPollingDeadlineExceeded):
+        await p.create_batch_task(make_batch_file(), polling_deadline=0.05)
+    # One operation budget, followed by a single metadata refresh at the deadline.
+    assert p.llm.batches.retrieve.await_count == 3
+    p.llm.batches.cancel.assert_not_awaited()
     p.llm.batches.retrieve.side_effect = None
     p.llm.batches.retrieve.return_value = make_batch()
     await p.create_batch_task(make_batch_file())
@@ -501,3 +505,50 @@ async def test_cancelled_provider_close_keeps_transport_open_until_helper_finish
     with pytest.raises(asyncio.CancelledError):
         await lifecycle
     p.llm.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_exhausted_list_polling_falls_back_to_known_id_without_cancellation():
+    p = provider(strategy="list", attempts=2)
+    p.llm.batches.list.side_effect = rate_limit({})
+    result = await p.create_batch_task(make_batch_file())
+    assert result.status == "completed"
+    assert p.llm.batches.list.await_count == 2
+    p.llm.batches.retrieve.assert_awaited_once_with("batch_123")
+    p.llm.batches.create.assert_awaited_once()
+    p.llm.batches.cancel.assert_not_awaited()
+    assert p.batch_handler.polling_strategy == "list"
+
+
+@pytest.mark.asyncio
+async def test_polling_failure_reconciles_completed_batch_before_cancellation():
+    p = provider(attempts=1)
+    p.llm.batches.retrieve.side_effect = [rate_limit({}), make_batch()]
+    result = await p.create_batch_task(make_batch_file(), timeout=0.01)
+    assert result.status == "completed"
+    assert p.llm.batches.retrieve.await_count == 2
+    p.llm.batches.cancel.assert_not_awaited()
+    p.llm.batches.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_exhausted_polling_preserves_remote_identity_and_original_cause():
+    p = provider(attempts=1)
+    p.llm.batches.retrieve.side_effect = rate_limit({})
+    from agents.exceptions import BatchPollingDeadlineExceeded
+
+    with pytest.raises(BatchPollingDeadlineExceeded) as failure:
+        await p.create_batch_task(make_batch_file(), polling_deadline=0.03)
+    assert failure.value.batch_id == "batch_123"
+    assert failure.value.remote_outcome_unknown
+    p.llm.batches.cancel.assert_not_awaited()
+    p.llm.batches.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_permanent_observation_failure_never_cancels_remote_work():
+    p = provider(attempts=1)
+    p.llm.batches.retrieve.side_effect = ValueError("Invalid configuration")
+    with pytest.raises(ValueError, match="Invalid configuration"):
+        await p.create_batch_task(make_batch_file())
+    p.llm.batches.cancel.assert_not_awaited()
