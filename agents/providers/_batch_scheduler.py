@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import IO, Any, Literal
 
-from ..exceptions import BatchPollingDeadlineExceeded
+from ..exceptions import AgentError, BatchPollingDeadlineExceeded
 from ..retries import RetryPolicy, is_retryable_exception, retry_operation
 
 logger = logging.getLogger(__name__)
@@ -255,9 +255,19 @@ class BatchScheduler:
         polling_deadline=None,
         **kwargs,
     ):
-        batch = await self._submit(
-            "creation", self.provider._create_batch_once, batch_file, **kwargs
-        )
+        try:
+            batch = await self._submit(
+                "creation", self.provider._create_batch_once, batch_file, **kwargs
+            )
+        except AgentError as exc:
+            exc.input_file_id = batch_file.id
+            exc.details = {
+                "operation": "batches.create",
+                "input_file_id": batch_file.id,
+                "remote_outcome_unknown": exc.remote_outcome_unknown,
+                "cause": exc.details,
+            }
+            raise
         callback = status_callback or (lambda batch: None)
         deadline = polling_deadline
         if deadline is None:

@@ -13,6 +13,10 @@ class AgentError(RuntimeError):
     retryable = False
     operation_scoped = True
     remote_outcome_unknown = False
+    status_code: int | None = None
+    request_id: str | None = None
+    batch_id: str | None = None
+    input_file_id: str | None = None
 
     def __init__(
         self,

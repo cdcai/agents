@@ -53,8 +53,6 @@ def normalize_exception(exc: Exception) -> Exception:
             body = body.get("error", body)
             if isinstance(body, dict):
                 code = body.get("code") or code
-        if code == "context_length_exceeded":
-            return ContextLengthExceededError(str(exc), code=code, details=body)
         status = getattr(exc, "status_code", None)
         transient = isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError))
         transient = (
@@ -62,9 +60,19 @@ def normalize_exception(exc: Exception) -> Exception:
             or status in (408, 409, 429)
             or (status is not None and status >= 500)
         )
-        error_class = RetryableAgentError if transient else TerminalAgentError
-        error = error_class(str(exc), code=code, details=body)
-        error.remote_outcome_unknown = isinstance(exc, openai.APIConnectionError)
+        error: AgentError
+        if code == "context_length_exceeded":
+            error = ContextLengthExceededError(str(exc), code=code, details=body)
+        else:
+            error_class = RetryableAgentError if transient else TerminalAgentError
+            error = error_class(str(exc), code=code, details=body)
+        error.status_code = status
+        error.request_id = getattr(exc, "request_id", None)
+        error.remote_outcome_unknown = (
+            isinstance(exc, openai.APIConnectionError)
+            or status == 408
+            or (status is not None and status >= 500)
+        )
         return error
     return exc
 
@@ -110,6 +118,7 @@ async def retry_operation[T](
                     code="retry_deadline_exceeded",
                     details={"remote_outcome_unknown": True},
                 )
+                deadline_error.remote_outcome_unknown = True
                 raise deadline_error from exc
         except Exception as exc:
             error = normalize_exception(exc)
