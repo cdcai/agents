@@ -1,11 +1,14 @@
 import asyncio
+import contextvars
 import copy
+import functools
 import inspect
 import json
 import logging
 import math
 import os
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from io import BytesIO
@@ -225,6 +228,7 @@ class OpenAIBatchAPIHelper(BatchScheduler, _BatchAPIHelper["AzureOpenAIBatchProv
         progress_renderer: BatchProgressRenderer | None = None,
         poll_frequency: int = 60,
         polling_strategy: Literal["retrieve", "list"] = "retrieve",
+        batch_executor: ThreadPoolExecutor | None = None,
     ):
         self.batch_size = batch_size
         self.n_workers = n_workers
@@ -239,6 +243,7 @@ class OpenAIBatchAPIHelper(BatchScheduler, _BatchAPIHelper["AzureOpenAIBatchProv
         self._progress_enabled = self.progress_max_items != 0
         self._progress_renderer_closed = False
         self.poll_frequency = poll_frequency
+        self.batch_executor = batch_executor
         self._init_scheduler(n_workers, polling_strategy)
 
     @property
@@ -408,6 +413,18 @@ class OpenAIBatchAPIHelper(BatchScheduler, _BatchAPIHelper["AzureOpenAIBatchProv
             self._cleanup_local_requests()
             raise
 
+    async def _run_operation_sync[T](self, function: Callable[..., T], *args: Any) -> T:
+        """Either offload sync operation to thread or dedicated executor passed at init"""
+        if self.batch_executor is None:
+            return await asyncio.to_thread(function, *args)
+        else:
+            context = contextvars.copy_context()
+            func = functools.partial(function, *args)
+
+            return await asyncio.get_running_loop().run_in_executor(
+                self.batch_executor, context.run, func
+            )
+
     async def _batcher(self):
         """
         Batch loop
@@ -445,7 +462,7 @@ class OpenAIBatchAPIHelper(BatchScheduler, _BatchAPIHelper["AzureOpenAIBatchProv
 
                             # Try to compute size, or fail the request
                             try:
-                                serialized_req = await asyncio.to_thread(
+                                serialized_req = await self._run_operation_sync(
                                     self.provider._serialize_request, req
                                 )
                             except (
@@ -479,7 +496,7 @@ class OpenAIBatchAPIHelper(BatchScheduler, _BatchAPIHelper["AzureOpenAIBatchProv
                     else:
                         # Otherwise: add it to the batch
                         batch_file_size += req_length
-                        await asyncio.to_thread(batch_file.write, serialized_req)
+                        await self._run_operation_sync(batch_file.write, serialized_req)
                         batch_ids.append(task_id)
                         del serialized_req
 
@@ -992,6 +1009,7 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         progress_max_items: int | None = DEFAULT_BATCH_PROGRESS_MAX_ITEMS,
         quiet: bool = False,
         resource_endpoint: str = "https://cognitiveservices.azure.com/.default",
+        batch_executor: ThreadPoolExecutor | None = None,
         **kwargs,
     ):
         """
@@ -1016,12 +1034,14 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
         self.batch_q: asyncio.Queue[BatchRequestInput] = asyncio.Queue()
         self.batch_out: dict[str, asyncio.Future[ChatCompletion]] = {}
         self.quiet = quiet
+        self.batch_executor = batch_executor
         if batch_handler is None and progress_max_items is not None:
             self.batch_handler = OpenAIBatchAPIHelper(
                 batch_size=batch_size,
                 n_workers=n_workers,
                 polling_strategy=polling_strategy,
                 progress_max_items=progress_max_items,
+                batch_executor=batch_executor,
             )
         elif batch_handler is not None and progress_max_items is None:
             self.batch_handler = batch_handler
@@ -1058,6 +1078,18 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
                     raise
         finally:
             await super().close()
+
+    async def _run_operation_sync[T](self, function: Callable[..., T], *args: Any) -> T:
+        """Either offload sync operation to thread or dedicated executor passed at init"""
+        if self.batch_executor is None:
+            return await asyncio.to_thread(function, *args)
+        else:
+            context = contextvars.copy_context()
+            func = functools.partial(function, *args)
+
+            return await asyncio.get_running_loop().run_in_executor(
+                self.batch_executor, context.run, func
+            )
 
     async def query_batch_mode(
         self, messages: list[ChatCompletionMessageParam], model: str, **kwargs
@@ -1173,7 +1205,7 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
             try:
                 result_stream = await download(file_id)
                 results.extend(
-                    await asyncio.to_thread(
+                    await self._run_operation_sync(
                         self._response_from_bytes, result_stream.content
                     )
                 )
