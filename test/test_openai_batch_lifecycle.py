@@ -57,6 +57,7 @@ def make_batch_file() -> FileObject:
 
 def make_provider(batches) -> AzureOpenAIBatchProvider:
     provider = object.__new__(AzureOpenAIBatchProvider)
+    provider.batch_executor = None
     provider.llm = SimpleNamespace(batches=batches)
     provider.quiet = True
     provider.batch_q = asyncio.Queue()

@@ -323,6 +323,7 @@ def test_provider_forwards_progress_limit_only_to_default_helper():
         n_workers=3,
         polling_strategy="retrieve",
         progress_max_items=4,
+        batch_executor=None,
     )
     helper.register_provider.assert_called_once_with(provider)
     assert "progress_max_items" not in async_azure_openai.call_args.kwargs

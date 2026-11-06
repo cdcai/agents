@@ -53,6 +53,7 @@ def azure_context_error(custom_id="bad"):
 
 def file_provider(batch):
     provider = object.__new__(AzureOpenAIBatchProvider)
+    provider.batch_executor = None
     provider.retry_policy = RetryPolicy(max_attempts=2, initial_delay=0)
     provider.llm = SimpleNamespace(files=SimpleNamespace(content=AsyncMock()))
     provider.quiet = True

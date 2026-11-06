@@ -169,6 +169,7 @@ def make_remote_cancel_provider():
         cancel=AsyncMock(side_effect=cancel),
     )
     provider = object.__new__(AzureOpenAIBatchProvider)
+    provider.batch_executor = None
     provider.quiet = True
     provider.batch_q = asyncio.Queue()
     provider.batch_out = {}

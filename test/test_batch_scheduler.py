@@ -18,6 +18,7 @@ from test.test_openai_batch_helper import make_batch, make_batch_file
 
 def provider(*, strategy="retrieve", attempts=3):
     result = object.__new__(AzureOpenAIBatchProvider)
+    result.batch_executor = None
     result.quiet = True
     result.batch_q = asyncio.Queue()
     result.batch_out = {}
