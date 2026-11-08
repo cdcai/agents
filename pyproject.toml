@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools>=77", "setuptools-scm>=9.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "agents"
-version = "0.4.6"
+dynamic = ["version"]
 description = "Yet another langchain-esque package to use language agents and compose agent-systems"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -44,3 +44,5 @@ Homepage = "https://github.com/cdcai/agents"
 
 [tool.setuptools.packages.find]
 include = ["agents", "agents.*"]
+
+[tool.setuptools_scm]
