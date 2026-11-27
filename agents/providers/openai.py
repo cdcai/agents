@@ -68,7 +68,7 @@ from ..exceptions import (
     TerminalBatchRequestError,
 )
 from ..observability import LLMUsage, Observable
-from ..retries import RetryPolicy, retry_operation
+from ..retries import RetryPolicy, is_retryable_exception, retry_operation
 from ._batch_scheduler import BatchScheduler
 
 DEFAULT_BATCH_SIZE = 1000
@@ -615,13 +615,29 @@ class OpenAIBatchAPIHelper(BatchScheduler, _BatchAPIHelper["AzureOpenAIBatchProv
                     continue
                 rows = grouped.get(custom_id, [])
                 if not rows:
+                    retrieval_errors = [
+                        error
+                        for error in protocol_errors
+                        if isinstance(error, dict)
+                        and ("file_id" in error or "output_file_id" in error)
+                    ]
+                    error_class = (
+                        RetryableBatchRequestError
+                        if any(error.get("retryable") for error in retrieval_errors)
+                        else BatchProtocolError
+                    )
                     future.set_exception(
                         deadline_error
-                        or BatchProtocolError(
+                        or error_class(
                             f"Batch [{batch_task.id}] returned no result for request [{custom_id}].",
                             custom_id=custom_id,
                             batch_id=batch_task.id,
-                            code="missing_batch_result",
+                            code=(
+                                "batch_result_retrieval_failed"
+                                if retrieval_errors
+                                else "missing_batch_result"
+                            ),
+                            remote_outcome_unknown=bool(retrieval_errors),
                             details={
                                 "batch_status": getattr(batch_task, "status", None),
                                 "batch_errors": getattr(batch_task, "errors", None),
@@ -899,7 +915,11 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
             )
 
         try:
-            res = await self._operation(request)
+            res = (
+                await request()
+                if self.mode == "batch"
+                else await self._operation(request)
+            )
         except ContextLengthExceededError as error:
             rebuilt = await self._rebuild_context(ag, prompt, error)
             if rebuilt is None or rebuilt == prompt:
@@ -907,7 +927,11 @@ class _AzureProvider[AgentT: _Agent, ProviderModeT: Literal["chat", "batch"]](
             prompt = await self._prepare_request(
                 ag, rebuilt, kwargs, allow_rebuild=False
             )
-            res = await self._operation(request)
+            res = (
+                await request()
+                if self.mode == "batch"
+                else await self._operation(request)
+            )
 
         out = res.choices[0]
 
@@ -1179,12 +1203,28 @@ class AzureOpenAIBatchProvider[AgentT: _Agent](
                 )
             except Exception as exc:  # noqa: BLE001 - preserve readable sibling files
                 # A broken error file must not discard successes already read.
+                logger.warning(
+                    "Unable to read batch [%s] result file [%s] (type=%s, code=%s, status=%s, request_id=%s)",
+                    batch.id,
+                    file_id,
+                    type(exc).__name__,
+                    getattr(exc, "code", None),
+                    getattr(exc, "status_code", None),
+                    getattr(exc, "request_id", None),
+                )
                 results.append(
                     {
                         "_batch_protocol_error": {
+                            "batch_id": batch.id,
                             "file_id": file_id,
                             "type": type(exc).__name__,
                             "code": getattr(exc, "code", None),
+                            "status_code": getattr(exc, "status_code", None),
+                            "request_id": getattr(exc, "request_id", None),
+                            "retryable": (
+                                is_retryable_exception(exc)
+                                or getattr(exc, "status_code", None) == 404
+                            ),
                         }
                     }
                 )

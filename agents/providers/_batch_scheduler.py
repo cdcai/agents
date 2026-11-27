@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import IO, Any, Literal
 
-from ..exceptions import BatchPollingDeadlineExceeded
+from ..exceptions import AgentError, BatchPollingDeadlineExceeded, RetryableAgentError
 from ..retries import RetryPolicy, is_retryable_exception, retry_operation
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,7 @@ class OperationJob:
     args: tuple[Any, ...]
     kwargs: dict[str, Any]
     future: asyncio.Future
+    retry: bool = True
     execution: asyncio.Task | None = None
 
 
@@ -88,10 +89,10 @@ class BatchScheduler:
             except Exception:  # noqa: BLE001 - the result belongs to the job future
                 break
 
-    async def _submit(self, name, operation, *args, **kwargs):
+    async def _submit(self, name, operation, *args, _retry=True, **kwargs):
         self._check_open()
         job = OperationJob(
-            operation, args, kwargs, asyncio.get_running_loop().create_future()
+            operation, args, kwargs, asyncio.get_running_loop().create_future(), _retry
         )
         self._jobs.add(job)
         # Track blocked producers too, so close can settle them without queue races.
@@ -157,7 +158,7 @@ class BatchScheduler:
                     self._request(
                         name,
                         lambda job=job: job.operation(*job.args, **job.kwargs),
-                        retry=name != "creation",
+                        retry=job.retry and name != "creation",
                     )
                 )
                 try:
@@ -255,9 +256,19 @@ class BatchScheduler:
         polling_deadline=None,
         **kwargs,
     ):
-        batch = await self._submit(
-            "creation", self.provider._create_batch_once, batch_file, **kwargs
-        )
+        try:
+            batch = await self._submit(
+                "creation", self.provider._create_batch_once, batch_file, **kwargs
+            )
+        except AgentError as exc:
+            exc.input_file_id = batch_file.id
+            exc.details = {
+                "operation": "batches.create",
+                "input_file_id": batch_file.id,
+                "remote_outcome_unknown": exc.remote_outcome_unknown,
+                "cause": exc.details,
+            }
+            raise
         callback = status_callback or (lambda batch: None)
         deadline = polling_deadline
         if deadline is None:
@@ -288,15 +299,27 @@ class BatchScheduler:
                 if not deadline_context.expired():
                     raise
                 await self._unregister(batch.id, registration)
-                await self._cleanup_remote(registration, retrieve=True)
+                await self._cleanup_remote(registration, retrieve=True, cancel=False)
                 raise BatchPollingDeadlineExceeded(
                     registration.batch, deadline
                 ) from exc
         except BatchPollingDeadlineExceeded:
             raise
-        except (Exception, asyncio.CancelledError):
+        except asyncio.CancelledError:
             await self._unregister(batch.id, registration)
             await self._cleanup_remote(registration)
+            raise
+        except Exception as exc:
+            await self._unregister(batch.id, registration)
+            if isinstance(exc, AgentError):
+                exc.batch_id = batch.id
+                exc.remote_outcome_unknown = True
+                exc.details = {
+                    "batch_id": batch.id,
+                    "batch_status": registration.batch.status,
+                    "remote_outcome_unknown": True,
+                    "cause": exc.details,
+                }
             raise
         finally:
             await self._unregister(batch.id, registration)
@@ -313,14 +336,17 @@ class BatchScheduler:
         elif not registration.future.cancelled():
             registration.future.exception()
 
-    async def _cleanup_remote(self, registration, *, retrieve=False):
+    async def _cleanup_remote(self, registration, *, retrieve=False, cancel=True):
         if registration.batch.status in TERMINAL:
-            return
+            return True
         try:
             async with asyncio.timeout(5):
-                batch = await self.provider._cancel_batch_once(registration.batch.id)
-                if getattr(batch, "id", None) == registration.batch.id:
-                    registration.batch = batch
+                if cancel:
+                    batch = await self.provider._cancel_batch_once(
+                        registration.batch.id
+                    )
+                    if getattr(batch, "id", None) == registration.batch.id:
+                        registration.batch = batch
                 if retrieve:
                     batch = await self.provider._retrieve_batch_once(
                         registration.batch.id
@@ -394,14 +420,17 @@ class BatchScheduler:
                     if not page.has_more or not page.data:
                         break
                     after = page.data[-1].id
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - fall back to known IDs
                 if self._unsupported_filter(exc.__cause__ or exc):
                     logger.warning(
                         "Azure batch list filter unsupported; using individual retrieval"
                     )
                     self.polling_strategy = "retrieve"
                 else:
-                    raise
+                    logger.warning(
+                        "Batch list polling failed; retrieving %s known batch IDs",
+                        len(unresolved),
+                    )
         for batch_id, registration in unresolved.items():
             if self._closed:
                 return
@@ -420,7 +449,17 @@ class BatchScheduler:
                     self._notify(registration, batch)
             except Exception as exc:  # noqa: BLE001 - isolate independent jobs
                 if not registration.future.done():
-                    registration.future.set_exception(exc)
+                    if is_retryable_exception(exc) or getattr(
+                        exc, "remote_outcome_unknown", False
+                    ):
+                        # Retain known work during observation loss. The lifecycle's
+                        # deadline bounds tracking; the interval prevents busy polling.
+                        registration.next_check = time.monotonic() + max(
+                            1, registration.interval
+                        )
+                        logger.warning("Batch [%s] temporarily unobservable", batch_id)
+                    else:
+                        registration.future.set_exception(exc)
 
     async def _poll_coordinator(self):
         while not self._closed:
@@ -448,7 +487,102 @@ class BatchScheduler:
 
     async def get_batch_results(self, batch):
         self._check_open()
-        return await self.provider._read_batch_results(batch, self._download_file)
+        results = []
+        files = {}
+        known_rows = {}
+        attempt = 0
+
+        async def download(file_id):
+            if file_id not in files:
+                # The recovery pass owns retries, so file retries cannot multiply it.
+                files[file_id] = await self._submit(
+                    "download",
+                    self.provider._download_batch_once,
+                    file_id,
+                    _retry=False,
+                )
+            return files[file_id]
+
+        async def read():
+            nonlocal batch, results, attempt
+            attempt += 1
+            if attempt > 1:
+                refreshed = await self.provider._retrieve_batch_once(batch.id)
+                if refreshed.id != batch.id:
+                    raise ValueError("Result recovery returned a different batch ID")
+                batch = refreshed
+            snapshot = await self.provider._read_batch_results(batch, download)
+            grouped = {}
+            unkeyed = []
+            for row in snapshot:
+                custom_id = row.get("custom_id") if isinstance(row, dict) else None
+                if isinstance(custom_id, str):
+                    grouped.setdefault(custom_id, []).append(row)
+                else:
+                    unkeyed.append(row)
+            # A later partial snapshot cannot erase readable rows or hide duplicates.
+            for custom_id, rows in grouped.items():
+                if len(rows) > len(known_rows.get(custom_id, [])):
+                    known_rows[custom_id] = rows
+            results = [row for rows in known_rows.values() for row in rows] + unkeyed
+            errors = [
+                row["_batch_protocol_error"]
+                for row in results
+                if isinstance(row, dict) and "_batch_protocol_error" in row
+            ]
+            counts = getattr(batch, "request_counts", None)
+            expected = 0 if counts is None else counts.completed + counts.failed
+            if batch.status == "completed" and counts is not None:
+                expected = counts.total
+            received = len(
+                {
+                    row["custom_id"]
+                    for row in results
+                    if isinstance(row, dict) and isinstance(row.get("custom_id"), str)
+                }
+            )
+            unavailable = any(error.get("retryable") for error in errors)
+            incomplete = not errors and received < expected
+            if unavailable or incomplete:
+                if incomplete:
+                    # A readable but incomplete snapshot may become available later.
+                    files.clear()
+                raise RetryableAgentError(
+                    f"Batch [{batch.id}] results are not yet fully available",
+                    code="batch_results_unavailable",
+                    details={
+                        "batch_id": batch.id,
+                        "expected": expected,
+                        "received": received,
+                        "file_errors": errors,
+                    },
+                )
+            return results
+
+        try:
+            return await self._request("results", read)
+        except Exception as exc:  # noqa: BLE001 - preserve readable sibling files
+            logger.warning(
+                "Result recovery exhausted for batch [%s] (output=%s, error=%s, type=%s, code=%s)",
+                batch.id,
+                batch.output_file_id,
+                batch.error_file_id,
+                type(exc).__name__,
+                getattr(exc, "code", None),
+            )
+            return [
+                *results,
+                {
+                    "_batch_protocol_error": {
+                        "batch_id": batch.id,
+                        "output_file_id": batch.output_file_id,
+                        "error_file_id": batch.error_file_id,
+                        "type": type(exc).__name__,
+                        "code": getattr(exc, "code", None),
+                        "retryable": is_retryable_exception(exc),
+                    }
+                },
+            ]
 
     async def _download_file(self, file_id):
         return await self._submit(

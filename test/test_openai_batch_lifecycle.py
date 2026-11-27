@@ -175,6 +175,11 @@ async def test_local_task_cancellation_cancels_remote_batch_without_masking_erro
 @pytest.mark.asyncio
 async def test_cancellation_during_remote_cleanup_takes_precedence():
     cleanup_started = asyncio.Event()
+    retrieve_started = asyncio.Event()
+
+    async def retrieve(batch_id):
+        retrieve_started.set()
+        await asyncio.Future()
 
     async def cancel(batch_id: str):
         cleanup_started.set()
@@ -182,7 +187,7 @@ async def test_cancellation_during_remote_cleanup_takes_precedence():
 
     batches = SimpleNamespace(
         create=AsyncMock(return_value=make_batch("in_progress")),
-        retrieve=AsyncMock(side_effect=RuntimeError("poll failed")),
+        retrieve=AsyncMock(side_effect=retrieve),
         cancel=AsyncMock(side_effect=cancel),
     )
     provider = make_provider(batches)
@@ -192,6 +197,8 @@ async def test_cancellation_during_remote_cleanup_takes_precedence():
             status_callback=Mock(side_effect=RuntimeError("callback failed")),
         )
     )
+    await asyncio.wait_for(retrieve_started.wait(), timeout=1)
+    task.cancel()
     await asyncio.wait_for(cleanup_started.wait(), timeout=1)
 
     task.cancel()
